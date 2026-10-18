@@ -1,0 +1,46 @@
+{
+  "name": "dsh-workspace-anchor",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "工作区锚点：让 DeepSeek Harness 桌面端「新建工作区」的文件夹选择框从你设定的默认目录开始（Windows）。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "workspace",
+    "directory-picker",
+    "windows"
+  ],
+  "license": "MIT",
+  "author": "milu7",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/milu7/dsh-workspace-anchor.git"
+  },
+  "homepage": "https://github.com/milu7/dsh-workspace-anchor#readme",
+  "bugs": {
+    "url": "https://github.com/milu7/dsh-workspace-anchor/issues"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "vendor",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

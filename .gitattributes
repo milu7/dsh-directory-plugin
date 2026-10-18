@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.node binary
+*.dll binary
+*.exe binary
+*.png binary
