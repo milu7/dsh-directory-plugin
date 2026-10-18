@@ -1,8 +1,8 @@
 {
-  "name": "dsh-workspace-anchor",
+  "name": "dsh-directory-plugin",
   "version": "1.0.0",
   "type": "module",
-  "description": "工作区锚点：让 DeepSeek Harness 桌面端「新建工作区」的文件夹选择框从你设定的默认目录开始（Windows）。",
+  "description": "目录插件：让 DeepSeek Harness 桌面端「新建工作区」的文件夹选择框从你设定的默认目录开始（Windows）。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -15,11 +15,11 @@
   "author": "milu7",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/milu7/dsh-workspace-anchor.git"
+    "url": "git+https://github.com/milu7/dsh-directory-plugin.git"
   },
-  "homepage": "https://github.com/milu7/dsh-workspace-anchor#readme",
+  "homepage": "https://github.com/milu7/dsh-directory-plugin#readme",
   "bugs": {
-    "url": "https://github.com/milu7/dsh-workspace-anchor/issues"
+    "url": "https://github.com/milu7/dsh-directory-plugin/issues"
   },
   "main": "lib/index.js",
   "exports": {

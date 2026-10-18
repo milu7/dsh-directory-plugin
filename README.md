@@ -1,4 +1,4 @@
-# 工作区锚点 · dsh-workspace-anchor
+# 目录插件 · dsh-directory-plugin
 
 **让 DeepSeek Harness 桌面端「新建工作区」永远从你自己的目录开始。**
 
@@ -12,6 +12,8 @@ DSH 桌面端新建工作区时会直接弹出系统文件夹选择框，起点�
 文件夹），而且这个对话框不接受任何调用参数。本插件把它换成「**默认打开在你设定的目录**」
 的原生选择框：你只需要在设置里指定一次，之后每次新建工作区都从那里开始，具体子目录仍然
 由你自己挑。
+
+中文名「目录插件」，仓库/包名即英文 id：`dsh-directory-plugin`。
 
 > 只支持 Windows：起始目录依赖 Win32 COM 的 `IFileDialog::SetFolder`。
 
@@ -28,14 +30,14 @@ DSH 桌面端新建工作区时会直接弹出系统文件夹选择框，起点�
 
 前置条件：Windows 10/11 + DeepSeek Harness **桌面端**。
 
-1. 把仓库克隆或下载到本地，例如 `D:\Plugins\dsh-workspace-anchor`；
+1. 把仓库克隆或下载到本地，例如 `D:\Plugins\dsh-directory-plugin`；
 2. 用 DSH 自带的插件命令行把它登记进 `desktop` 配置档（`link:` 表示直接引用本地目录，
    不复制文件）：
 
 ```powershell
 # 按实际情况修改这两个变量
 $DSH_EXE = 'C:\Program Files\DSH\DSH NEXT.exe'   # 你的 DSH 桌面端安装位置
-$PLUGIN  = 'D:\Plugins\dsh-workspace-anchor'     # 本仓库所在的本地目录
+$PLUGIN  = 'D:\Plugins\dsh-directory-plugin'     # 本仓库所在的本地目录
 
 $CLI = Join-Path (Split-Path $DSH_EXE) 'resources\app.asar\lib\plugin-cli.js'
 
@@ -54,13 +56,14 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 3. 之后每次「新建工作区」，选择框都会从该目录开始；
 4. 「恢复系统默认」清空配置，回到 DSH 原来的行为。
 
-配置示例（`%USERPROFILE%\.dsh\workspace-anchor.json`）：
+配置示例（`%USERPROFILE%\.dsh\workspace-directory.json`）：
 
 ```json
 { "directory": "D:\\Projects" }
 ```
 
-旧版本（`dsh-default-workspace-dir`）的配置会在首次读取时自动迁移，无需手动处理。
+旧版本（`workspace-anchor.json` / `default-workspace-directory.json`）的配置会在首次读取时
+自动迁移，无需手动处理。
 
 ## 工作原理
 
@@ -68,7 +71,7 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 
 | 平面 | 文件 | 作用 |
 | --- | --- | --- |
-| 宿主（host） | `lib/index.js` | 注册两个同源 HTTP 路由：`/dsh-workspace-anchor/config`、`/dsh-workspace-anchor/pick` |
+| 宿主（host） | `lib/index.js` | 注册两个同源 HTTP 路由：`/dsh-directory-plugin/config`、`/dsh-directory-plugin/pick` |
 | 浏览器（client） | `client/client.js` | 接管 `conversation.hero.workspace.directoryFlow` / `sidebar.workspaces.directoryFlow` 槽位，并注册设置页 |
 | 核心 | `lib/core.js` | 配置读写、目录校验、拉起对话框子进程 |
 | Worker | `lib/dialog-worker.cjs` | 一次性 Node 子进程，用 koffi 直接调 Win32 COM |
@@ -82,11 +85,11 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。
 
 ## 排错
 
-诊断日志：`%USERPROFILE%\.dsh\workspace-anchor.log`
+诊断日志：`%USERPROFILE%\.dsh\workspace-directory.log`
 
 | 日志 | 含义 |
 | --- | --- |
-| `host-routes-registered /dsh-workspace-anchor` | 宿主侧已加载、HTTP 路由就绪 |
+| `host-routes-registered /dsh-directory-plugin` | 宿主侧已加载、HTTP 路由就绪 |
 | `pick D:\Projects\demo initial={"applied":true,...}` | 选择框确实以配置目录为起点 |
 | `pick (cancelled) ...` | 用户取消了 |
 | `pick-failed ...` | 对话框进程出错，界面会回退到系统默认行为 |
@@ -110,7 +113,7 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。
 ```powershell
 $env:ELECTRON_RUN_AS_NODE = '1'
 $env:DSH_HOME = "$env:USERPROFILE\.dsh"
-& $DSH_EXE --expose-internals $CLI desktop remove dsh-workspace-anchor
+& $DSH_EXE --expose-internals $CLI desktop remove dsh-directory-plugin
 ```
 
 然后重启 DSH。配置文件与日志会留在 `%USERPROFILE%\.dsh` 下，可手动删除。
@@ -130,11 +133,11 @@ LICENSE                 MIT
 
 ## English
 
-**dsh-workspace-anchor** is a plugin for the DeepSeek Harness desktop app on Windows. It
-replaces the folder chooser used by *New Workspace* with a native dialog that opens at a
-directory you configure (DSH's built-in picker always starts at the system default). It
-adds a settings page, falls back silently to the stock picker when anything goes wrong,
-and ships koffi so no network install is needed.
+**Directory Plugin** (`dsh-directory-plugin`) is a plugin for the DeepSeek Harness desktop
+app on Windows. It replaces the folder chooser used by *New Workspace* with a native dialog
+that opens at a directory you configure (DSH's built-in picker always starts at the system
+default). It adds a settings page, falls back silently to the stock picker when anything
+goes wrong, and ships koffi so no network install is needed.
 
 ## License
 

@@ -1,5 +1,5 @@
 # 把插件行加进宿主组合（host plane）。
 # 这个文件由 dsh.profile.bundles 挂载，id 即配置项 id，name 由 profile 的 node_modules 解析。
 - insert:
-    - id: dsh-workspace-anchor
-      name: dsh-workspace-anchor
+    - id: dsh-directory-plugin
+      name: dsh-directory-plugin

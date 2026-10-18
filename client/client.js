@@ -5,7 +5,7 @@
  *  2) 在设置页注册自己的入口（输入框 / 浏览 / 保存 / 恢复默认）。
  */
 window.__ModuleLoader__.load({
-	id: "dsh-workspace-anchor",
+	id: "dsh-directory-plugin",
 	factory: function (require) {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -13,8 +13,8 @@ window.__ModuleLoader__.load({
 		var react = require("react");
 		var h = react.createElement;
 
-		var NS = "dshWorkspaceAnchor";
-		var BASE = "/dsh-workspace-anchor";
+		var NS = "dshDirectoryPlugin";
+		var BASE = "/dsh-directory-plugin";
 		var HOLES = ["conversation.hero.workspace.directoryFlow", "sidebar.workspaces.directoryFlow"];
 		var BRIDGE_GLOBAL = "__DSH_DIRECTORY_PICKER__";
 
@@ -109,9 +109,9 @@ window.__ModuleLoader__.load({
 			try {
 				ctx.effect(function () {
 					return ctx.locale.register(NS, { zh: zh, en: en });
-				}, "dsh-workspace-anchor dictionaries");
+				}, "dsh-directory-plugin dictionaries");
 			} catch (error) {
-				console.warn("[dsh-workspace-anchor] locale registration failed", error);
+				console.warn("[dsh-directory-plugin] locale registration failed", error);
 			}
 
 			/**
@@ -133,7 +133,7 @@ window.__ModuleLoader__.load({
 						function report(message) {
 							if (!alive) return;
 							if (typeof props.onError === "function") props.onError(message);
-							else console.warn("[dsh-workspace-anchor] " + message);
+							else console.warn("[dsh-directory-plugin] " + message);
 						}
 						function fallback(reason) {
 							pickViaBridge().then(picked, function () {
@@ -314,18 +314,18 @@ window.__ModuleLoader__.load({
 					});
 				});
 			} catch (error) {
-				console.warn("[dsh-workspace-anchor] directory flow takeover failed", error);
+				console.warn("[dsh-directory-plugin] directory flow takeover failed", error);
 			}
 
 			try {
 				ctx.slots.inject("settings.section", function () {
 					return ctx.slots.register(
-						{ name: "settings.section", id: "workspace-anchor", order: 16, label: function () { return t("nav"); }, locale: NS },
+						{ name: "settings.section", id: "directory-plugin", order: 16, label: function () { return t("nav"); }, locale: NS },
 						SettingsPage
 					);
 				});
 			} catch (error) {
-				console.warn("[dsh-workspace-anchor] settings section registration failed", error);
+				console.warn("[dsh-directory-plugin] settings section registration failed", error);
 			}
 		}
 
@@ -334,11 +334,11 @@ window.__ModuleLoader__.load({
 			try {
 				applyInner(ctx);
 			} catch (error) {
-				console.warn("[dsh-workspace-anchor] client plugin failed to apply", error);
+				console.warn("[dsh-directory-plugin] client plugin failed to apply", error);
 			}
 		}
 
-		exports.name = "dsh-workspace-anchor";
+		exports.name = "dsh-directory-plugin";
 		exports.inject = ["slots", "locale"];
 		exports.apply = apply;
 		return module.exports;
