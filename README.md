@@ -116,7 +116,9 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 
 <p align="center"><sub>从点击「新建工作区」到原生选择框打开（示意图）</sub></p>
 
-koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。
+koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。worker 只接受 koffi 3.x：随包的那份加载
+不了时（比如 ARM64 机器），会依次尝试 DSH 安装目录里自带的 koffi，主版本不是 3 的一律跳过；
+都不行就报错，界面回退到 DSH 自带的选择框。
 
 ## 排错
 
