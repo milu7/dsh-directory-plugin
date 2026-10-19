@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { normalizeDialogTitle, normalizeDirectory, parseDirectory, pickDirectory, readSettings, runPick, writeSettings } from "../lib/core.js";
+import { logEvent, normalizeDialogTitle, normalizeDirectory, parseDirectory, pickDirectory, readSettings, runPick, writeSettings } from "../lib/core.js";
 import { onPlatform } from "./helpers.js";
 
 const FAKE_WORKER = fileURLToPath(new URL("./fixtures/fake-worker.cjs", import.meta.url));
@@ -83,39 +83,85 @@ describe("writeSettings：配置文件被占用", () => {
 });
 
 describe("normalizeDirectory：只接受完整的绝对路径", () => {
-	test("拒绝相对路径，错误码 not-absolute，detail 是原始输入", () => {
-		assert.throws(() => normalizeDirectory("Projects"), { code: "not-absolute", detail: "Projects" });
-		assert.throws(() => normalizeDirectory("..\\Projects"), { code: "not-absolute" });
+	test("拒绝相对路径，错误码 not-absolute，detail 是原始输入", async () => {
+		await assert.rejects(normalizeDirectory("Projects"), { code: "not-absolute", detail: "Projects" });
+		await assert.rejects(normalizeDirectory("..\\Projects"), { code: "not-absolute" });
 	});
 
-	test("拒绝盘符相对、当前盘根相对的写法", windowsOnly, () => {
-		assert.throws(() => normalizeDirectory("C:"), { code: "not-absolute" });
-		assert.throws(() => normalizeDirectory("C:Projects"), { code: "not-absolute" });
-		assert.throws(() => normalizeDirectory("\\Projects"), { code: "not-absolute" });
+	test("拒绝盘符相对、当前盘根相对的写法", windowsOnly, async () => {
+		await assert.rejects(normalizeDirectory("C:"), { code: "not-absolute" });
+		await assert.rejects(normalizeDirectory("C:Projects"), { code: "not-absolute" });
+		await assert.rejects(normalizeDirectory("\\Projects"), { code: "not-absolute" });
 	});
 
-	test("不存在、不是文件夹、不是字符串、引号里是空的：各有错误码", () => {
+	test("不存在、不是文件夹、不是字符串、引号里是空的：各有错误码", async () => {
 		const missing = path.join(home, "missing");
-		assert.throws(() => normalizeDirectory(missing), { code: "not-found", detail: missing });
+		await assert.rejects(normalizeDirectory(missing), { code: "not-found", detail: missing });
 		const file = path.join(home, "file.txt");
 		fs.writeFileSync(file, "");
-		assert.throws(() => normalizeDirectory(file), { code: "not-a-directory", detail: file });
-		assert.throws(() => normalizeDirectory(42), { code: "not-a-string" });
-		assert.throws(() => normalizeDirectory('""'), { code: "empty" });
+		await assert.rejects(normalizeDirectory(file), { code: "not-a-directory", detail: file });
+		await assert.rejects(normalizeDirectory(42), { code: "not-a-string" });
+		await assert.rejects(normalizeDirectory('""'), { code: "empty" });
 	});
 
-	test("接受带引号的绝对路径", () => {
-		assert.equal(normalizeDirectory(`"${home}"`), home);
+	test("接受带引号的绝对路径", async () => {
+		assert.equal(await normalizeDirectory(`"${home}"`), home);
 	});
 
-	test("接受正斜杠写法并规范化", windowsOnly, () => {
-		assert.equal(normalizeDirectory(home.replaceAll("\\", "/") + "/"), home);
+	test("接受正斜杠写法并规范化", windowsOnly, async () => {
+		assert.equal(await normalizeDirectory(home.replaceAll("\\", "/") + "/"), home);
+	});
+
+	test("用异步 stat：断开的网络盘不会卡住整个宿主", async (t) => {
+		t.mock.method(fs, "statSync", () => {
+			throw new Error("不应该调用同步的 statSync");
+		});
+		let release;
+		const stat = fs.promises.stat;
+		t.mock.method(fs.promises, "stat", (target) => new Promise((resolve) => (release = () => resolve(stat(target)))));
+
+		let done = false;
+		const pending = normalizeDirectory(home).then((directory) => ((done = true), directory));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(done, false, "stat 还没返回，宿主的事件循环照常在转");
+		release();
+		assert.equal(await pending, home);
 	});
 
 	test("parseDirectory 只检查写法，不要求目录存在", () => {
 		const missing = path.join(home, "missing");
 		assert.equal(parseDirectory(`"${missing}"`), missing);
 		assert.throws(() => parseDirectory("Projects"), { code: "not-absolute" });
+	});
+});
+
+describe("logEvent：诊断日志", () => {
+	test("换行被转义：堆栈这样的多行文本也只占一行", () => {
+		logEvent("pick-failed", "Error: boom\n    at a\r\n    at b");
+		const lines = readLog().split("\n").filter(Boolean);
+		assert.equal(lines.length, 1);
+		assert.match(lines[0], / pick-failed Error: boom\\n {4}at a\\n {4}at b$/);
+	});
+
+	test("超过 1MB 时轮转成 .log.1，新日志从空文件开始", () => {
+		const old = "x".repeat(1024 * 1024) + "\n";
+		fs.writeFileSync(logFile(), old);
+		logEvent("after-rotation");
+		assert.equal(fs.readFileSync(logFile() + ".1", "utf8"), old);
+		assert.match(readLog(), /^\S+ after-rotation\n$/);
+
+		// 再轮转一次：旧的 .1 被替换，始终只留一份旧日志。
+		fs.writeFileSync(logFile(), old.replaceAll("x", "y"));
+		logEvent("second-rotation");
+		assert.ok(fs.readFileSync(logFile() + ".1", "utf8").startsWith("y"));
+		assert.deepEqual(fs.readdirSync(home).filter((name) => name.startsWith("workspace-directory.log")).sort(), ["workspace-directory.log", "workspace-directory.log.1"]);
+	});
+
+	test("没到 1MB 时只追加", () => {
+		logEvent("first");
+		logEvent("second");
+		assert.equal(readLog().split("\n").filter(Boolean).length, 2);
+		assert.ok(!fs.existsSync(logFile() + ".1"));
 	});
 });
 
