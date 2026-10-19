@@ -65,6 +65,9 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 3. 之后每次「新建工作区」，选择框都会从该目录开始；
 4. 「恢复系统默认」清空配置，回到 DSH 原来的行为。
 
+选择框是 DSH 窗口的模态对话框：它居中显示在 DSH 上面，开着的时候 DSH 窗口点不动。点了之后
+马上切到别的程序的话，选择框不会抢前台，任务栏按钮会闪烁提示。
+
 同一时刻只会有一个选择框：设置页的「浏览…」开着时再点「新建工作区」（或者反过来），
 后来的那个会提示「已经有一个文件夹选择框开着」，不会再弹出第二个框。
 
@@ -128,7 +131,8 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。worker 只
 | 日志 | 含义 |
 | --- | --- |
 | `host-routes-registered /dsh-directory-plugin` | 宿主侧已加载、HTTP 路由就绪 |
-| `pick D:\Projects\demo purpose=workspace initial={"applied":true,...}` | 选择框确实以配置目录为起点（`purpose=settings` 是设置页的「浏览…」） |
+| `pick D:\Projects\demo purpose=workspace owner=… initial={"applied":true,...}` | 选择框确实以配置目录为起点（`purpose=settings` 是设置页的「浏览…」）；`owner` 是 DSH 窗口句柄，`none` 表示当时前台不是 DSH、选择框没有父窗口 |
+| `owner-reenable <句柄>` | 选择框进程在对话框开着时意外退出，已经把被它禁用的 DSH 窗口恢复 |
 | `pick (cancelled) ...` | 用户取消了 |
 | `pick-failed <错误码> <说明> ...` | 对话框进程出错（worker 的堆栈也在这一行），界面会回退到系统默认行为 |
 | `route-failed <路径> <说明>` | 路由处理器里出了没料到的异常，已回 500；请附上这一行提 issue |
