@@ -13,8 +13,11 @@ const PICK = "/dsh-directory-plugin/pick";
 const SAME_ORIGIN_JSON = { "content-type": "application/json", "sec-fetch-site": "same-origin" };
 
 // 这里的用例都不该真的拉起对话框进程；万一校验失效，宁可报错也别弹出真窗口。
+// 记下每次调用，方便检查交给 worker 的环境变量。
+const spawnCalls = [];
 before(() => {
-	mock.method(childProcess, "spawn", () => {
+	mock.method(childProcess, "spawn", (command, args, options) => {
+		spawnCalls.push({ command, args, options });
 		throw new Error("测试中不应拉起对话框进程");
 	});
 	syncBuiltinESMExports();
@@ -28,10 +31,16 @@ let home;
 beforeEach(() => {
 	home = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-directory-plugin-"));
 	process.env.DSH_HOME = home;
+	spawnCalls.length = 0;
 });
 afterEach(() => {
 	fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });
 });
+
+const readLog = () => {
+	const file = path.join(home, "workspace-directory.log");
+	return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+};
 
 /** 通过 apply() 拿到真正注册的路由处理器。 */
 function routes() {
@@ -72,6 +81,7 @@ describe("CSRF 防护", () => {
 	test("/pick 不再接受 GET", async () => {
 		const result = await call(PICK, { method: "GET", headers: { "sec-fetch-site": "same-origin" } });
 		assert.equal(result.status, 405);
+		assert.equal(result.body.code, "method-not-allowed");
 	});
 
 	test("非 JSON 的 POST 被拒绝（跨站表单、no-cors 请求只能发这种）", async () => {
@@ -83,8 +93,11 @@ describe("CSRF 防护", () => {
 
 	test("浏览器标为跨站的请求被拒绝", async () => {
 		const crossSite = { ...SAME_ORIGIN_JSON, "sec-fetch-site": "cross-site" };
-		assert.equal((await call(PICK, { method: "POST", headers: crossSite, body: {} })).status, 403);
+		const picked = await call(PICK, { method: "POST", headers: crossSite, body: {} });
+		assert.equal(picked.status, 403);
+		assert.equal(picked.body.code, "cross-site");
 		assert.equal((await call(CONFIG, { method: "GET", headers: crossSite })).status, 403);
+		assert.equal(spawnCalls.length, 0);
 	});
 
 	test("同源 JSON 请求照常工作，地址栏直接打开 GET /config 也可以", async () => {
@@ -99,20 +112,66 @@ describe("CSRF 防护", () => {
 });
 
 describe("POST /config", () => {
-	test("相对路径返回 400，并提示要写绝对路径", async () => {
+	test("相对路径返回 400 和错误码 not-absolute，detail 是原始输入", async () => {
 		const result = await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: { directory: "Projects" } });
 		assert.equal(result.status, 400);
-		assert.match(result.body.error, /绝对路径/);
+		assert.equal(result.body.code, "not-absolute");
+		assert.equal(result.body.detail, "Projects");
+		assert.equal(typeof result.body.error, "string");
 	});
 
-	test("配置文件一直被占用时返回 500，而不是让请求悬空", async (t) => {
+	test("配置文件一直被占用时返回 500 save-failed，而不是让请求悬空", async (t) => {
 		t.mock.method(fs.promises, "rename", async () => {
 			throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
 		});
 
 		const result = await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: { directory: home } });
 		assert.equal(result.status, 500);
-		assert.match(result.body.error, /EPERM/);
+		assert.equal(result.body.code, "save-failed");
+		assert.match(result.body.detail, /EPERM/);
 		assert.deepEqual(fs.readdirSync(home).filter((name) => name.endsWith(".tmp")), []);
+	});
+
+	test("请求体不是 JSON 对象时返回 400", async () => {
+		const notJson = await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: "{oops" });
+		assert.equal(notJson.status, 400);
+		assert.equal(notJson.body.code, "invalid-json");
+		const array = await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: "[]" });
+		assert.equal(array.body.code, "invalid-body");
+	});
+
+	test("PUT 不再被当成 POST（以前的报错文案写着只支持 GET/POST）", async () => {
+		const result = await call(CONFIG, { method: "PUT", headers: SAME_ORIGIN_JSON, body: { directory: home } });
+		assert.equal(result.status, 405);
+		assert.equal(result.body.code, "method-not-allowed");
+		assert.ok(!fs.existsSync(path.join(home, "workspace-directory.json")));
+	});
+});
+
+describe("POST /pick", () => {
+	test("客户端给的标题（去掉控制字符后）交给 worker；失败时只回错误码和说明，不带堆栈", async () => {
+		const result = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { title: "选择\n文件夹" } });
+		assert.equal(spawnCalls.length, 1);
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_TITLE, "选择 文件夹");
+
+		assert.equal(result.status, 500);
+		assert.equal(result.body.code, "pick-failed");
+		assert.equal(result.body.detail, "测试中不应拉起对话框进程");
+		assert.doesNotMatch(JSON.stringify(result.body), /\\n\s+at /);
+		assert.match(readLog(), /pick-failed pick-failed /);
+	});
+
+	test("没给标题时 worker 收到空串（对话框用系统自带的标题）", async () => {
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_TITLE, "");
+	});
+});
+
+describe("兜底", () => {
+	test("处理器里没料到的异常回 500 internal-error，而不是让请求悬空", async () => {
+		const result = await call(CONFIG, { method: "GET", headers: null });
+		assert.equal(result.status, 500);
+		assert.equal(result.body.code, "internal-error");
+		assert.match(readLog(), /route-failed/);
 	});
 });

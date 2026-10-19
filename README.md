@@ -103,6 +103,9 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 两个路由只服务 DSH 自己的页面：浏览器标为跨站的请求返回 403，POST 必须是
 `application/json`（否则 415），`/pick` 只接受 POST——避免任意网页跨站调用它们。
 
+出错时路由返回非 2xx 和 `{ code, error, detail }`：设置页按错误码显示当前界面语言的文案，
+`error` 是给日志看的英文说明，堆栈只写进日志。对话框标题也由客户端按界面语言传过来。
+
 <p align="center">
   <img src="docs/images/how-it-works.png" alt="弹框链路：客户端槽位 → 宿主路由 → Worker → Win32 COM → 原生选择框" width="880">
 </p>
@@ -120,7 +123,8 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。
 | `host-routes-registered /dsh-directory-plugin` | 宿主侧已加载、HTTP 路由就绪 |
 | `pick D:\Projects\demo initial={"applied":true,...}` | 选择框确实以配置目录为起点 |
 | `pick (cancelled) ...` | 用户取消了 |
-| `pick-failed ...` | 对话框进程出错，界面会回退到系统默认行为 |
+| `pick-failed <错误码> <说明> ...` | 对话框进程出错（worker 的堆栈也在这一行），界面会回退到系统默认行为 |
+| `route-failed <路径> <说明>` | 路由处理器里出了没料到的异常，已回 500；请附上这一行提 issue |
 | `config-corrupt <文件> <原因>` | 配置文件不是合法 JSON（多半是反斜杠没写成 `\\`），已按未设置处理，文件原样保留 |
 | `config-write-failed ...` | 保存配置失败（多为文件被其他程序占用），设置页会显示错误，稍后重试即可 |
 
