@@ -120,7 +120,8 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。
 
 ## 排错
 
-诊断日志：`%USERPROFILE%\.dsh\workspace-directory.log`
+诊断日志：`%USERPROFILE%\.dsh\workspace-directory.log`（一个事件一行；超过 1MB 时旧日志改名为
+`workspace-directory.log.1`，只保留这一份）
 
 | 日志 | 含义 |
 | --- | --- |
