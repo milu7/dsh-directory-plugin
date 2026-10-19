@@ -17,6 +17,14 @@ DSH 桌面端新建工作区时会直接弹出系统文件夹选择框，起点�
 
 > 只支持 Windows：起始目录依赖 Win32 COM 的 `IFileDialog::SetFolder`。
 
+## 预览
+
+<p align="center">
+  <img src="docs/images/overview.png" alt="默认从系统下载目录开始；安装插件后从 D:\Projects 开始" width="880">
+</p>
+
+<p align="center"><sub>同一操作，不同起点：默认从系统下载目录出发，插件从你设定的目录出发（示意图）</sub></p>
+
 ## 功能
 
 - **接管目录选择流程**：替换「新建工作区」弹出的文件夹对话框，从一个可配置的目录开始。
@@ -56,6 +64,14 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 3. 之后每次「新建工作区」，选择框都会从该目录开始；
 4. 「恢复系统默认」清空配置，回到 DSH 原来的行为。
 
+设置页：
+
+<p align="center">
+  <img src="docs/images/settings.png" alt="设置 → 新建工作区目录：输入框、浏览…、保存、恢复系统默认" width="880">
+</p>
+
+<p align="center"><sub>设置 →「新建工作区目录」：输入框、浏览…、保存、恢复系统默认（示意图）</sub></p>
+
 配置示例（`%USERPROFILE%\.dsh\workspace-directory.json`）：
 
 ```json
@@ -80,6 +96,12 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 `CoCreateInstance(FileOpenDialog)` → `SHCreateItemFromParsingName` 造 `IShellItem` →
 `IFileDialog::SetFolder`（vtable 第 12 槽）→ `Show()`。失败时客户端回退到桌面端内置的
 `__DSH_DIRECTORY_PICKER__`。
+
+<p align="center">
+  <img src="docs/images/how-it-works.png" alt="弹框链路：客户端槽位 → 宿主路由 → Worker → Win32 COM → 原生选择框" width="880">
+</p>
+
+<p align="center"><sub>从点击「新建工作区」到原生选择框打开（示意图）</sub></p>
 
 koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。
 
@@ -128,6 +150,7 @@ lib/core.js             配置读写 + 拉起对话框子进程
 lib/dialog-worker.cjs   Win32 文件夹对话框 worker（支持起始目录）
 client/client.js        浏览器 bundle：接管目录流程 + 设置页
 vendor/                 随包携带的 koffi 3.1.1
+docs/images/            README 示意图（overview / settings / how-it-works）
 LICENSE                 MIT
 ```
 
