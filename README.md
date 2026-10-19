@@ -131,7 +131,7 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。worker 只
 | 日志 | 含义 |
 | --- | --- |
 | `host-routes-registered /dsh-directory-plugin` | 宿主侧已加载、HTTP 路由就绪 |
-| `pick D:\Projects\demo purpose=workspace owner=… initial={"applied":true,...}` | 选择框确实以配置目录为起点（`purpose=settings` 是设置页的「浏览…」）；`owner` 是 DSH 窗口句柄，`none` 表示当时前台不是 DSH、选择框没有父窗口 |
+| `pick D:\Projects\demo purpose=workspace owner=… koffi=… initial={"applied":true,...}` | 选择框确实以配置目录为起点（`purpose=settings` 是设置页的「浏览…」）；`owner` 是 DSH 窗口句柄，`none` 表示当时前台不是 DSH、选择框没有父窗口；`koffi` 是 worker 实际加载的 koffi（`vendor` 里那份，或者回退到的 DSH 自带那份） |
 | `owner-reenable <句柄>` | 选择框进程在对话框开着时意外退出，已经把被它禁用的 DSH 窗口恢复 |
 | `pick (cancelled) ...` | 用户取消了 |
 | `pick-failed <错误码> <说明> ...` | 对话框进程出错（worker 的堆栈也在这一行），界面会回退到系统默认行为 |

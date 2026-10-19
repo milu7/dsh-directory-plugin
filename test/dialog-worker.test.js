@@ -206,7 +206,8 @@ describe("loadKoffi：只接受 koffi 3（第 11 条）", () => {
 	test("跳过找不到的和主版本不对的，用第一个 3.x", () => {
 		const koffi3 = { version: "3.1.1" };
 		const loaded = loadKoffi(["missing", "old", "new"], fakeLoad({ old: { version: "2.9.0" }, new: { default: koffi3 } }));
-		assert.equal(loaded, koffi3);
+		assert.equal(loaded.koffi, koffi3);
+		assert.equal(loaded.source, "new", "报告实际用的是哪一份，写进日志");
 	});
 
 	test("一个能用的都没有：报错里写明每个候选的问题", () => {
@@ -223,7 +224,7 @@ describe("loadKoffi：只接受 koffi 3（第 11 条）", () => {
 	});
 
 	test("随包带的 koffi 通过版本检查", windowsOnly, () => {
-		assert.match(loadKoffi([VENDORED_KOFFI]).version, /^3\./);
+		assert.match(loadKoffi([VENDORED_KOFFI]).koffi.version, /^3\./);
 	});
 });
 
@@ -241,6 +242,7 @@ describe("Win32 绑定冒烟测试（真实 API，但不调用 Show，不会弹�
 
 	test("对话框对象：GetOptions（vtable 第 10 槽）读得到默认选项，SetOptions/SetTitle 成功", () => {
 		withBindings((bindings) => {
+			assert.equal(bindings.koffiSource, VENDORED_KOFFI);
 			assert.ok(bindings.coInitializeSta() >= 0);
 			try {
 				const dialog = bindings.createFolderDialog();
