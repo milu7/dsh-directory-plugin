@@ -22,7 +22,8 @@ window.__ModuleLoader__.load({
 			nav: "新建工作区目录",
 			title: "新建工作区：默认打开目录",
 			hint: "设置后，每次「新建工作区」弹出的文件夹选择框都会从这个目录开始；具体子目录仍然由你自己选。留空则保持系统默认位置。",
-			placeholder: "例如 D:\\\\Projects",
+			inputLabel: "默认打开目录",
+			placeholder: "例如 D:\\Projects",
 			browse: "浏览…",
 			browsing: "已打开选择框…",
 			save: "保存",
@@ -42,7 +43,8 @@ window.__ModuleLoader__.load({
 			nav: "Workspace folder",
 			title: "New workspace: starting folder",
 			hint: "The folder chooser of \"new workspace\" will start in this directory. You still pick the exact subfolder yourself. Leave empty for the system default.",
-			placeholder: "e.g. D:\\\\Projects",
+			inputLabel: "Default starting folder",
+			placeholder: "e.g. D:\\Projects",
 			browse: "Browse…",
 			browsing: "Chooser opened…",
 			save: "Save",
@@ -57,6 +59,30 @@ window.__ModuleLoader__.load({
 			pickFailed: "Failed to open the chooser",
 			fallbackHint: "The configured folder is gone, so the chooser opened at the system default",
 			invalid: "Invalid directory"
+		};
+
+		/* 设置页样式：放在组件外面，每次渲染复用同一批对象。 */
+		var CONTROL_STYLE = {
+			borderRadius: 8,
+			border: "1px solid rgba(127,127,127,0.4)",
+			background: "transparent",
+			color: "inherit",
+			fontFamily: "inherit",
+			fontSize: 13,
+			lineHeight: "20px"
+		};
+		var BUTTON_STYLE = Object.assign({}, CONTROL_STYLE, { cursor: "pointer", padding: "6px 14px", opacity: 1 });
+		var BUSY_BUTTON_STYLE = Object.assign({}, BUTTON_STYLE, { cursor: "default", opacity: 0.5 });
+		var INPUT_STYLE = Object.assign({}, CONTROL_STYLE, { flex: 1, minWidth: 240, padding: "6px 10px" });
+		var PAGE_STYLE = { display: "flex", flexDirection: "column", gap: 12, padding: "20px 8px", maxWidth: 720 };
+		var TITLE_STYLE = { margin: 0, fontSize: 16, fontWeight: 600 };
+		var HINT_STYLE = { margin: 0, opacity: 0.7, fontSize: 13, lineHeight: 1.6 };
+		var ROW_STYLE = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" };
+		var CURRENT_STYLE = { margin: 0, fontSize: 12, lineHeight: 1.6, opacity: 0.7 };
+		var STATUS_STYLES = {
+			muted: { margin: 0, fontSize: 12, lineHeight: 1.6, color: "inherit", opacity: 0.7 },
+			error: { margin: 0, fontSize: 12, lineHeight: 1.6, color: "#e5484d", opacity: 1 },
+			ok: { margin: 0, fontSize: 12, lineHeight: 1.6, color: "#30a46c", opacity: 1 }
 		};
 
 		function messageOf(error) {
@@ -120,19 +146,26 @@ window.__ModuleLoader__.load({
 			 */
 			function DirectoryFlow(props) {
 				var open = props && props.open;
+				// 下面的 effect 只随 open 重跑；对话框开着时父组件可能换了回调，结果要交给最新的那一份。
+				var latest = react.useRef(props);
+				react.useEffect(function () {
+					latest.current = props;
+				});
 				react.useEffect(
 					function () {
 						if (!open) return undefined;
 						var alive = true;
 						function picked(path) {
 							if (!alive) return;
+							var current = latest.current || {};
 							if (typeof path === "string" && path !== "") {
-								if (typeof props.onPicked === "function") props.onPicked(path);
-							} else if (typeof props.onCancel === "function") props.onCancel();
+								if (typeof current.onPicked === "function") current.onPicked(path);
+							} else if (typeof current.onCancel === "function") current.onCancel();
 						}
 						function report(message) {
 							if (!alive) return;
-							if (typeof props.onError === "function") props.onError(message);
+							var current = latest.current || {};
+							if (typeof current.onError === "function") current.onError(message);
 							else console.warn("[dsh-directory-plugin] " + message);
 						}
 						function fallback(reason) {
@@ -237,45 +270,23 @@ window.__ModuleLoader__.load({
 					);
 				}
 
-				var buttonStyle = {
-					cursor: state.busy ? "default" : "pointer",
-					borderRadius: 8,
-					border: "1px solid rgba(127,127,127,0.4)",
-					background: "transparent",
-					color: "inherit",
-					fontFamily: "inherit",
-					fontSize: 13,
-					lineHeight: "20px",
-					padding: "6px 14px",
-					opacity: state.busy ? 0.5 : 1
-				};
-				var inputStyle = {
-					flex: 1,
-					minWidth: 240,
-					borderRadius: 8,
-					border: "1px solid rgba(127,127,127,0.4)",
-					background: "transparent",
-					color: "inherit",
-					fontFamily: "inherit",
-					fontSize: 13,
-					lineHeight: "20px",
-					padding: "6px 10px"
-				};
+				var buttonStyle = state.busy ? BUSY_BUTTON_STYLE : BUTTON_STYLE;
 
 				return h(
 					"div",
-					{ style: { display: "flex", flexDirection: "column", gap: 12, padding: "20px 8px", maxWidth: 720 } },
-					h("h3", { style: { margin: 0, fontSize: 16, fontWeight: 600 } }, t("title")),
-					h("p", { style: { margin: 0, opacity: 0.7, fontSize: 13, lineHeight: 1.6 } }, t("hint")),
+					{ style: PAGE_STYLE },
+					h("h3", { style: TITLE_STYLE }, t("title")),
+					h("p", { style: HINT_STYLE }, t("hint")),
 					h(
 						"div",
-						{ style: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" } },
+						{ style: ROW_STYLE },
 						h("input", {
 							type: "text",
 							value: state.value,
 							placeholder: t("placeholder"),
+							"aria-label": t("inputLabel"),
 							spellCheck: false,
-							style: inputStyle,
+							style: INPUT_STYLE,
 							onChange: function (event) {
 								update({ value: event.target.value, status: "", tone: "muted" });
 							}
@@ -284,40 +295,22 @@ window.__ModuleLoader__.load({
 						h("button", { type: "button", style: buttonStyle, disabled: state.busy, onClick: save }, t("save")),
 						h("button", { type: "button", style: buttonStyle, disabled: state.busy, onClick: reset }, t("clear"))
 					),
-					h(
-						"p",
-						{ style: { margin: 0, fontSize: 12, lineHeight: 1.6, opacity: 0.7 } },
-						t("current"),
-						state.saved === null ? t("none") : state.saved
-					),
-					state.status === ""
-						? null
-						: h(
-								"p",
-								{
-									style: {
-										margin: 0,
-										fontSize: 12,
-										lineHeight: 1.6,
-										color: state.tone === "error" ? "#e5484d" : state.tone === "ok" ? "#30a46c" : "inherit",
-										opacity: state.tone === "muted" ? 0.7 : 1
-									}
-								},
-								state.status
-							)
+					h("p", { style: CURRENT_STYLE }, t("current"), state.saved === null ? t("none") : state.saved),
+					// 状态行一直挂在页面上（空着也在），读屏软件才会播报后来填进去的文字。
+					h("p", { role: "status", "aria-live": "polite", style: STATUS_STYLES[state.tone] || STATUS_STYLES.muted }, state.status)
 				);
 			}
 
-			try {
-				ctx.slots.inject(HOLES[0], function () {
-					return ctx.slots.inject(HOLES[1], function* () {
-						yield ctx.slots.register({ name: HOLES[0], priority: -2 }, DirectoryFlow);
-						yield ctx.slots.register({ name: HOLES[1], priority: -2 }, DirectoryFlow);
+			// 两个槽位各自注册：DSH 哪天改名或删掉其中一个，另一个入口照样接管。
+			HOLES.forEach(function (hole) {
+				try {
+					ctx.slots.inject(hole, function () {
+						return ctx.slots.register({ name: hole, priority: -2 }, DirectoryFlow);
 					});
-				});
-			} catch (error) {
-				console.warn("[dsh-directory-plugin] directory flow takeover failed", error);
-			}
+				} catch (error) {
+					console.warn("[dsh-directory-plugin] directory flow takeover failed: " + hole, error);
+				}
+			});
 
 			try {
 				ctx.slots.inject("settings.section", function () {
