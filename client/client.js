@@ -6,19 +6,16 @@
  */
 window.__ModuleLoader__.load({
 	id: "dsh-directory-plugin",
-	factory: function (require) {
-		var module = { exports: {} };
-		var exports = module.exports;
+	factory(require) {
+		const react = require("react");
+		const h = react.createElement;
 
-		var react = require("react");
-		var h = react.createElement;
+		const NS = "dshDirectoryPlugin";
+		const BASE = "/dsh-directory-plugin";
+		const HOLES = ["conversation.hero.workspace.directoryFlow", "sidebar.workspaces.directoryFlow"];
+		const BRIDGE_GLOBAL = "__DSH_DIRECTORY_PICKER__";
 
-		var NS = "dshDirectoryPlugin";
-		var BASE = "/dsh-directory-plugin";
-		var HOLES = ["conversation.hero.workspace.directoryFlow", "sidebar.workspaces.directoryFlow"];
-		var BRIDGE_GLOBAL = "__DSH_DIRECTORY_PICKER__";
-
-		var zh = {
+		const zh = {
 			nav: "新建工作区目录",
 			title: "新建工作区：默认打开目录",
 			hint: "设置后，每次「新建工作区」弹出的文件夹选择框都会从这个目录开始；具体子目录仍然由你自己选。留空则保持系统默认位置。",
@@ -54,7 +51,7 @@ window.__ModuleLoader__.load({
 			errBusy: "已经有一个文件夹选择框开着，请先关掉它",
 			errUnsupported: "只支持 Windows"
 		};
-		var en = {
+		const en = {
 			nav: "Workspace folder",
 			title: "New workspace: starting folder",
 			hint: "The folder chooser of \"new workspace\" will start in this directory. You still pick the exact subfolder yourself. Leave empty for the system default.",
@@ -91,7 +88,7 @@ window.__ModuleLoader__.load({
 		};
 
 		/** 宿主错误码 → 文案 key。没列出来的（跨站、请求格式不对等）只会出在调用方写错时，直接显示英文说明。 */
-		var ERROR_KEYS = {
+		const ERROR_KEYS = {
 			"not-a-string": "errNotString",
 			empty: "errEmpty",
 			"not-absolute": "errNotAbsolute",
@@ -106,7 +103,7 @@ window.__ModuleLoader__.load({
 		};
 
 		/* 设置页样式：放在组件外面，每次渲染复用同一批对象。 */
-		var CONTROL_STYLE = {
+		const CONTROL_STYLE = {
 			borderRadius: 8,
 			border: "1px solid rgba(127,127,127,0.4)",
 			background: "transparent",
@@ -115,53 +112,48 @@ window.__ModuleLoader__.load({
 			fontSize: 13,
 			lineHeight: "20px"
 		};
-		var BUTTON_STYLE = Object.assign({}, CONTROL_STYLE, { cursor: "pointer", padding: "6px 14px", opacity: 1 });
-		var BUSY_BUTTON_STYLE = Object.assign({}, BUTTON_STYLE, { cursor: "default", opacity: 0.5 });
-		var INPUT_STYLE = Object.assign({}, CONTROL_STYLE, { flex: 1, minWidth: 240, padding: "6px 10px" });
-		var PAGE_STYLE = { display: "flex", flexDirection: "column", gap: 12, padding: "20px 8px", maxWidth: 720 };
-		var TITLE_STYLE = { margin: 0, fontSize: 16, fontWeight: 600 };
-		var HINT_STYLE = { margin: 0, opacity: 0.7, fontSize: 13, lineHeight: 1.6 };
-		var ROW_STYLE = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" };
-		var CURRENT_STYLE = { margin: 0, fontSize: 12, lineHeight: 1.6, opacity: 0.7 };
-		var STATUS_STYLES = {
+		const BUTTON_STYLE = { ...CONTROL_STYLE, cursor: "pointer", padding: "6px 14px", opacity: 1 };
+		const BUSY_BUTTON_STYLE = { ...BUTTON_STYLE, cursor: "default", opacity: 0.5 };
+		const INPUT_STYLE = { ...CONTROL_STYLE, flex: 1, minWidth: 240, padding: "6px 10px" };
+		const PAGE_STYLE = { display: "flex", flexDirection: "column", gap: 12, padding: "20px 8px", maxWidth: 720 };
+		const TITLE_STYLE = { margin: 0, fontSize: 16, fontWeight: 600 };
+		const HINT_STYLE = { margin: 0, opacity: 0.7, fontSize: 13, lineHeight: 1.6 };
+		const ROW_STYLE = { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" };
+		const CURRENT_STYLE = { margin: 0, fontSize: 12, lineHeight: 1.6, opacity: 0.7 };
+		const STATUS_STYLES = {
 			muted: { margin: 0, fontSize: 12, lineHeight: 1.6, color: "inherit", opacity: 0.7 },
 			error: { margin: 0, fontSize: 12, lineHeight: 1.6, color: "#e5484d", opacity: 1 },
 			ok: { margin: 0, fontSize: 12, lineHeight: 1.6, color: "#30a46c", opacity: 1 }
 		};
 
 		function messageOf(error) {
-			if (error && typeof error.message === "string") return error.message;
+			if (typeof error?.message === "string") return error.message;
 			return String(error);
 		}
 
-		function requestJson(path, init) {
-			var options = Object.assign(
-				{
-					credentials: "same-origin",
-					cache: "no-store",
-					headers: { "content-type": "application/json" }
-				},
-				init || {}
-			);
-			return fetch(BASE + path, options).then(function (response) {
-				return response.text().then(function (text) {
-					var data = null;
-					try {
-						data = text === "" ? null : JSON.parse(text);
-					} catch {
-						data = null;
-					}
-					if (!response.ok) {
-						// 宿主的错误体是 { code, error, detail? }：code 用来选文案，error 是英文说明。
-						var error = new Error((data && data.error) || "HTTP " + response.status);
-						error.status = response.status;
-						error.code = data && typeof data.code === "string" ? data.code : null;
-						error.detail = data && typeof data.detail === "string" ? data.detail : null;
-						throw error;
-					}
-					return data || {};
-				});
+		async function requestJson(path, init) {
+			const response = await fetch(BASE + path, {
+				credentials: "same-origin",
+				cache: "no-store",
+				headers: { "content-type": "application/json" },
+				...init
 			});
+			const text = await response.text();
+			let data = null;
+			try {
+				data = text === "" ? null : JSON.parse(text);
+			} catch {
+				data = null;
+			}
+			if (!response.ok) {
+				// 宿主的错误体是 { code, error, detail? }：code 用来选文案，error 是英文说明。
+				const error = new Error(data?.error || "HTTP " + response.status);
+				error.status = response.status;
+				error.code = typeof data?.code === "string" ? data.code : null;
+				error.detail = typeof data?.detail === "string" ? data.detail : null;
+				throw error;
+			}
+			return data || {};
 		}
 
 		/**
@@ -174,35 +166,31 @@ window.__ModuleLoader__.load({
 		}
 
 		/** 回退：桌面端预加载的 __DSH_DIRECTORY_PICKER__（系统默认位置）。 */
-		function pickViaBridge() {
-			var bridge = globalThis[BRIDGE_GLOBAL];
-			if (!bridge || typeof bridge.pick !== "function") {
-				return Promise.reject(new Error("directory picker bridge is unavailable"));
-			}
-			return Promise.resolve(bridge.pick());
+		async function pickViaBridge() {
+			const bridge = globalThis[BRIDGE_GLOBAL];
+			if (typeof bridge?.pick !== "function") throw new Error("directory picker bridge is unavailable");
+			return bridge.pick();
 		}
 
 		function applyInner(ctx) {
-			var t = ctx.locale.bind(NS);
+			const t = ctx.locale.bind(NS);
 
 			try {
-				ctx.effect(function () {
-					return ctx.locale.register(NS, { zh: zh, en: en });
-				}, "dsh-directory-plugin dictionaries");
+				ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-directory-plugin dictionaries");
 			} catch (error) {
 				console.warn("[dsh-directory-plugin] locale registration failed", error);
 			}
 
 			/** 错误的界面文案：认识的错误码按当前语言翻译并接上 detail，否则显示原始说明。 */
 			function describe(error) {
-				var key = error && error.code ? ERROR_KEYS[error.code] : undefined;
+				const key = error?.code ? ERROR_KEYS[error.code] : undefined;
 				if (key === undefined) return messageOf(error);
-				return t(key) + (error.detail ? error.detail : "");
+				return t(key) + (error.detail || "");
 			}
 
 			/** 当前语言的对话框标题；词典没注册上（t 原样返回 key）时交给系统默认标题。 */
 			function dialogTitle(key) {
-				var text = t(key);
+				const text = t(key);
 				return typeof text === "string" && text !== "" && text !== key ? text : undefined;
 			}
 
@@ -211,136 +199,126 @@ window.__ModuleLoader__.load({
 			 * 组件本身不渲染任何东西（与桌面端内置实现一致）。
 			 */
 			function DirectoryFlow(props) {
-				var open = props && props.open;
+				const open = props?.open;
 				// 下面的 effect 只随 open 重跑；对话框开着时父组件可能换了回调，结果要交给最新的那一份。
-				var latest = react.useRef(props);
-				react.useEffect(function () {
+				const latest = react.useRef(props);
+				react.useEffect(() => {
 					latest.current = props;
 				});
-				react.useEffect(
-					function () {
-						if (!open) return undefined;
-						var alive = true;
-						function picked(path) {
+				react.useEffect(() => {
+					if (!open) return undefined;
+					let alive = true;
+					const picked = (path) => {
+						if (!alive) return;
+						const current = latest.current || {};
+						if (typeof path === "string" && path !== "") {
+							if (typeof current.onPicked === "function") current.onPicked(path);
+						} else if (typeof current.onCancel === "function") current.onCancel();
+					};
+					const report = (message) => {
+						if (!alive) return;
+						const current = latest.current || {};
+						if (typeof current.onError === "function") current.onError(message);
+						else console.warn("[dsh-directory-plugin] " + message);
+					};
+					const run = async () => {
+						let data;
+						try {
+							data = await pickViaHost({ purpose: "workspace", title: dialogTitle("dialogTitleWorkspace") });
+						} catch (error) {
 							if (!alive) return;
-							var current = latest.current || {};
-							if (typeof path === "string" && path !== "") {
-								if (typeof current.onPicked === "function") current.onPicked(path);
-							} else if (typeof current.onCancel === "function") current.onCancel();
-						}
-						function report(message) {
-							if (!alive) return;
-							var current = latest.current || {};
-							if (typeof current.onError === "function") current.onError(message);
-							else console.warn("[dsh-directory-plugin] " + message);
-						}
-						function fallback(reason) {
-							pickViaBridge().then(picked, function () {
-								report(describe(reason));
-							});
-						}
-						pickViaHost({ purpose: "workspace", title: dialogTitle("dialogTitleWorkspace") }).then(
-							function (data) {
-								if (!alive) return;
-								picked(data && data.path);
-							},
-							function (error) {
-								if (!alive) return;
-								// 设置页的选择框正开着：直接告诉用户，不再弹出第二个（DSH 自带的）框。
-								if (error && error.code === "busy") report(describe(error));
-								else fallback(error);
+							// 设置页的选择框正开着：直接告诉用户，不再弹出第二个（DSH 自带的）框。
+							if (error?.code === "busy") {
+								report(describe(error));
+								return;
 							}
-						);
-						return function () {
-							alive = false;
-						};
-					},
-					[open]
-				);
+							let path;
+							try {
+								path = await pickViaBridge();
+							} catch {
+								report(describe(error));
+								return;
+							}
+							picked(path);
+							return;
+						}
+						if (alive) picked(data?.path);
+					};
+					run().catch((error) => console.warn("[dsh-directory-plugin] directory flow failed", error));
+					return () => {
+						alive = false;
+					};
+				}, [open]);
 				return null;
 			}
 
 			/** 设置页入口。 */
 			function SettingsPage() {
-				var pair = react.useState({ value: "", saved: null, status: "", tone: "muted", busy: false, supported: true });
-				var state = pair[0];
-				var setState = pair[1];
+				const [state, setState] = react.useState({ value: "", saved: null, status: "", tone: "muted", busy: false, supported: true });
+				const update = (patch) => setState((prev) => ({ ...prev, ...patch }));
 
-				function update(patch) {
-					setState(function (prev) {
-						return Object.assign({}, prev, patch);
-					});
-				}
-
-				react.useEffect(function () {
-					var alive = true;
-					requestJson("/config", { method: "GET" }).then(
-						function (data) {
-							if (!alive) return;
-							var directory = typeof data.directory === "string" ? data.directory : "";
-							update({ value: directory, saved: directory === "" ? null : directory, status: "", tone: "muted", busy: false, supported: data.supported !== false });
-						},
-						function (error) {
-							if (!alive) return;
-							update({ value: "", saved: null, status: t("loadFailed") + describe(error), tone: "error", busy: false });
+				react.useEffect(() => {
+					let alive = true;
+					(async () => {
+						let data;
+						try {
+							data = await requestJson("/config", { method: "GET" });
+						} catch (error) {
+							if (alive) update({ value: "", saved: null, status: t("loadFailed") + describe(error), tone: "error", busy: false });
+							return;
 						}
-					);
-					return function () {
+						if (!alive) return;
+						const directory = typeof data.directory === "string" ? data.directory : "";
+						update({ value: directory, saved: directory === "" ? null : directory, status: "", tone: "muted", busy: false, supported: data.supported !== false });
+					})();
+					return () => {
 						alive = false;
 					};
 				}, []);
 
-				function browse() {
+				async function browse() {
 					update({ busy: true, status: t("browsing"), tone: "muted" });
 					// 从输入框里的当前值打开（可能还没保存）；输入框空着就从已保存的目录打开。
-					var typed = state.value.trim();
-					pickViaHost({ purpose: "settings", title: dialogTitle("dialogTitleSettings"), initialDirectory: typed === "" ? undefined : typed }).then(
-						function (data) {
-							var info = data && data.initialFolder;
-							// 只有确实请求了起始目录、却没能用上时才算回退；没配置时 worker 报的是 requested: null。
-							var fellBack = !!(info && info.requested && info.applied === false);
-							var path = data && typeof data.path === "string" && data.path !== "" ? data.path : null;
-							setState(function (prev) {
-								if (path !== null && path !== prev.saved) {
-									return Object.assign({}, prev, { value: path, busy: false, status: t("unsaved"), tone: "muted" });
-								}
-								return Object.assign({}, prev, {
-									value: path === null ? prev.value : path,
-									busy: false,
-									status: fellBack ? t("fallbackHint") : "",
-									tone: fellBack ? "error" : "muted"
-								});
-							});
-						},
-						function (error) {
-							update({ busy: false, status: t("pickFailed") + describe(error), tone: "error" });
-						}
-					);
+					const typed = state.value.trim();
+					let data;
+					try {
+						data = await pickViaHost({ purpose: "settings", title: dialogTitle("dialogTitleSettings"), initialDirectory: typed === "" ? undefined : typed });
+					} catch (error) {
+						update({ busy: false, status: t("pickFailed") + describe(error), tone: "error" });
+						return;
+					}
+					const info = data?.initialFolder;
+					// 只有确实请求了起始目录、却没能用上时才算回退；没配置时 worker 报的是 requested: null。
+					const fellBack = Boolean(info?.requested && info.applied === false);
+					const path = typeof data?.path === "string" && data.path !== "" ? data.path : null;
+					setState((prev) => {
+						if (path !== null && path !== prev.saved) return { ...prev, value: path, busy: false, status: t("unsaved"), tone: "muted" };
+						return { ...prev, value: path ?? prev.value, busy: false, status: fellBack ? t("fallbackHint") : "", tone: fellBack ? "error" : "muted" };
+					});
 				}
 
-				function save() {
+				async function save() {
 					update({ busy: true, status: t("saving"), tone: "muted" });
-					requestJson("/config", { method: "POST", body: JSON.stringify({ directory: state.value }) }).then(
-						function (data) {
-							var directory = data && typeof data.directory === "string" ? data.directory : "";
-							update({ value: directory, saved: directory === "" ? null : directory, status: t("saved"), tone: "ok", busy: false });
-						},
-						function (error) {
-							update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
-						}
-					);
+					let data;
+					try {
+						data = await requestJson("/config", { method: "POST", body: JSON.stringify({ directory: state.value }) });
+					} catch (error) {
+						update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
+						return;
+					}
+					const directory = typeof data?.directory === "string" ? data.directory : "";
+					update({ value: directory, saved: directory === "" ? null : directory, status: t("saved"), tone: "ok", busy: false });
 				}
 
-				function reset() {
+				async function reset() {
 					update({ busy: true, status: t("saving"), tone: "muted" });
-					requestJson("/config", { method: "POST", body: JSON.stringify({ directory: "" }) }).then(
-						function () {
-							update({ value: "", saved: null, status: t("cleared"), tone: "ok", busy: false });
-						},
-						function (error) {
-							update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
-						}
-					);
+					try {
+						await requestJson("/config", { method: "POST", body: JSON.stringify({ directory: "" }) });
+					} catch (error) {
+						update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
+						return;
+					}
+					update({ value: "", saved: null, status: t("cleared"), tone: "ok", busy: false });
 				}
 
 				// 宿主不是 Windows：只说明情况，不显示用不了的输入框和按钮。
@@ -348,7 +326,7 @@ window.__ModuleLoader__.load({
 					return h("div", { style: PAGE_STYLE }, h("h3", { style: TITLE_STYLE }, t("title")), h("p", { style: HINT_STYLE }, t("unsupported")));
 				}
 
-				var buttonStyle = state.busy ? BUSY_BUTTON_STYLE : BUTTON_STYLE;
+				const buttonStyle = state.busy ? BUSY_BUTTON_STYLE : BUTTON_STYLE;
 
 				return h(
 					"div",
@@ -365,9 +343,7 @@ window.__ModuleLoader__.load({
 							"aria-label": t("inputLabel"),
 							spellCheck: false,
 							style: INPUT_STYLE,
-							onChange: function (event) {
-								update({ value: event.target.value, status: "", tone: "muted" });
-							}
+							onChange: (event) => update({ value: event.target.value, status: "", tone: "muted" })
 						}),
 						h("button", { type: "button", style: buttonStyle, disabled: state.busy, onClick: browse }, t("browse")),
 						h("button", { type: "button", style: buttonStyle, disabled: state.busy, onClick: save }, t("save")),
@@ -380,23 +356,18 @@ window.__ModuleLoader__.load({
 			}
 
 			// 两个槽位各自注册：DSH 哪天改名或删掉其中一个，另一个入口照样接管。
-			HOLES.forEach(function (hole) {
+			for (const hole of HOLES) {
 				try {
-					ctx.slots.inject(hole, function () {
-						return ctx.slots.register({ name: hole, priority: -2 }, DirectoryFlow);
-					});
+					ctx.slots.inject(hole, () => ctx.slots.register({ name: hole, priority: -2 }, DirectoryFlow));
 				} catch (error) {
 					console.warn("[dsh-directory-plugin] directory flow takeover failed: " + hole, error);
 				}
-			});
+			}
 
 			try {
-				ctx.slots.inject("settings.section", function () {
-					return ctx.slots.register(
-						{ name: "settings.section", id: "directory-plugin", order: 16, label: function () { return t("nav"); }, locale: NS },
-						SettingsPage
-					);
-				});
+				ctx.slots.inject("settings.section", () =>
+					ctx.slots.register({ name: "settings.section", id: "directory-plugin", order: 16, label: () => t("nav"), locale: NS }, SettingsPage)
+				);
 			} catch (error) {
 				console.warn("[dsh-directory-plugin] settings section registration failed", error);
 			}
@@ -411,9 +382,6 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		exports.name = "dsh-directory-plugin";
-		exports.inject = ["slots", "locale"];
-		exports.apply = apply;
-		return module.exports;
+		return { name: "dsh-directory-plugin", inject: ["slots", "locale"], apply };
 	}
 });
