@@ -33,11 +33,22 @@ window.__ModuleLoader__.load({
 			cleared: "已恢复系统默认位置",
 			current: "当前生效：",
 			none: "（未设置，使用系统默认位置）",
-			loadFailed: "读取配置失败",
-			saveFailed: "保存失败",
-			pickFailed: "打开选择框失败",
+			loadFailed: "读取配置失败：",
+			saveFailed: "保存失败：",
+			pickFailed: "打开选择框失败：",
 			fallbackHint: "配置的目录已不存在或无法打开，选择框已回退到系统默认位置",
-			invalid: "目录无效"
+			dialogTitleWorkspace: "选择新工作区所在文件夹",
+			dialogTitleSettings: "选择默认打开的目录",
+			// 宿主返回的错误码对应的文案；后面直接接上 detail（路径、底层错误）。
+			errNotString: "目录必须是文本",
+			errEmpty: "目录不能为空",
+			errNotAbsolute: "请填写完整的绝对路径（例如 D:\\Projects）：",
+			errNotFound: "目录不存在：",
+			errNotDirectory: "不是文件夹：",
+			errSaveFailed: "写入配置文件失败：",
+			errPickTimeout: "选择框启动超时",
+			errPickExited: "选择框进程意外退出：",
+			errPickFailed: "原生选择框出错："
 		};
 		var en = {
 			nav: "Workspace folder",
@@ -54,11 +65,34 @@ window.__ModuleLoader__.load({
 			cleared: "System default restored",
 			current: "Active: ",
 			none: "(not set — system default)",
-			loadFailed: "Failed to read settings",
-			saveFailed: "Failed to save",
-			pickFailed: "Failed to open the chooser",
+			loadFailed: "Failed to read settings: ",
+			saveFailed: "Failed to save: ",
+			pickFailed: "Failed to open the chooser: ",
 			fallbackHint: "The configured folder is gone, so the chooser opened at the system default",
-			invalid: "Invalid directory"
+			dialogTitleWorkspace: "Choose a folder for the new workspace",
+			dialogTitleSettings: "Choose the default starting folder",
+			errNotString: "The folder must be text",
+			errEmpty: "The folder is empty",
+			errNotAbsolute: "Enter a full absolute path (e.g. D:\\Projects): ",
+			errNotFound: "Folder not found: ",
+			errNotDirectory: "Not a folder: ",
+			errSaveFailed: "Could not write the settings file: ",
+			errPickTimeout: "The folder chooser did not start in time",
+			errPickExited: "The folder chooser process exited unexpectedly: ",
+			errPickFailed: "The native folder chooser failed: "
+		};
+
+		/** 宿主错误码 → 文案 key。没列出来的（跨站、请求格式不对等）只会出在调用方写错时，直接显示英文说明。 */
+		var ERROR_KEYS = {
+			"not-a-string": "errNotString",
+			empty: "errEmpty",
+			"not-absolute": "errNotAbsolute",
+			"not-found": "errNotFound",
+			"not-a-directory": "errNotDirectory",
+			"save-failed": "errSaveFailed",
+			"pick-timeout": "errPickTimeout",
+			"pick-exited": "errPickExited",
+			"pick-failed": "errPickFailed"
 		};
 
 		/* 设置页样式：放在组件外面，每次渲染复用同一批对象。 */
@@ -108,16 +142,24 @@ window.__ModuleLoader__.load({
 						data = null;
 					}
 					if (!response.ok) {
-						throw new Error((data && data.error) || "HTTP " + response.status);
+						// 宿主的错误体是 { code, error, detail? }：code 用来选文案，error 是英文说明。
+						var error = new Error((data && data.error) || "HTTP " + response.status);
+						error.status = response.status;
+						error.code = data && typeof data.code === "string" ? data.code : null;
+						error.detail = data && typeof data.detail === "string" ? data.detail : null;
+						throw error;
 					}
 					return data || {};
 				});
 			});
 		}
 
-		/** 用宿主路由打开原生选择框。 */
-		function pickViaHost() {
-			return requestJson("/pick", { method: "POST", body: "{}" });
+		/**
+		 * 用宿主路由打开原生选择框。
+		 * @param {string | undefined} title - 对话框标题；不给就用系统自带的。
+		 */
+		function pickViaHost(title) {
+			return requestJson("/pick", { method: "POST", body: JSON.stringify({ title: title }) });
 		}
 
 		/** 回退：桌面端预加载的 __DSH_DIRECTORY_PICKER__（系统默认位置）。 */
@@ -138,6 +180,19 @@ window.__ModuleLoader__.load({
 				}, "dsh-directory-plugin dictionaries");
 			} catch (error) {
 				console.warn("[dsh-directory-plugin] locale registration failed", error);
+			}
+
+			/** 错误的界面文案：认识的错误码按当前语言翻译并接上 detail，否则显示原始说明。 */
+			function describe(error) {
+				var key = error && error.code ? ERROR_KEYS[error.code] : undefined;
+				if (key === undefined) return messageOf(error);
+				return t(key) + (error.detail ? error.detail : "");
+			}
+
+			/** 当前语言的对话框标题；词典没注册上（t 原样返回 key）时交给系统默认标题。 */
+			function dialogTitle(key) {
+				var text = t(key);
+				return typeof text === "string" && text !== "" && text !== key ? text : undefined;
 			}
 
 			/**
@@ -170,15 +225,13 @@ window.__ModuleLoader__.load({
 						}
 						function fallback(reason) {
 							pickViaBridge().then(picked, function () {
-								report(messageOf(reason));
+								report(describe(reason));
 							});
 						}
-						pickViaHost().then(
+						pickViaHost(dialogTitle("dialogTitleWorkspace")).then(
 							function (data) {
 								if (!alive) return;
-								if (data && typeof data.path === "string" && data.path !== "") picked(data.path);
-								else if (data && data.error) fallback(data.error);
-								else picked(null);
+								picked(data && data.path);
 							},
 							function (error) {
 								if (!alive) return;
@@ -210,7 +263,7 @@ window.__ModuleLoader__.load({
 						},
 						function (error) {
 							if (!alive) return;
-							setState({ value: "", saved: null, status: t("loadFailed") + "：" + messageOf(error), tone: "error", busy: false });
+							setState({ value: "", saved: null, status: t("loadFailed") + describe(error), tone: "error", busy: false });
 						}
 					);
 					return function () {
@@ -226,12 +279,8 @@ window.__ModuleLoader__.load({
 
 				function browse() {
 					update({ busy: true, status: t("browsing"), tone: "muted" });
-					pickViaHost().then(
+					pickViaHost(dialogTitle("dialogTitleSettings")).then(
 						function (data) {
-							if (data && data.error) {
-								update({ busy: false, status: t("pickFailed") + "：" + data.error, tone: "error" });
-								return;
-							}
 							var info = data && data.initialFolder;
 							// 只有确实配置了起始目录、却没能用上时才算回退；没配置时 worker 报的是 requested: null。
 							var fellBack = !!(info && info.requested && info.applied === false);
@@ -240,7 +289,7 @@ window.__ModuleLoader__.load({
 							else update({ busy: false, status: hint, tone: fellBack ? "error" : "muted" });
 						},
 						function (error) {
-							update({ busy: false, status: t("pickFailed") + "：" + messageOf(error), tone: "error" });
+							update({ busy: false, status: t("pickFailed") + describe(error), tone: "error" });
 						}
 					);
 				}
@@ -253,7 +302,7 @@ window.__ModuleLoader__.load({
 							setState({ value: directory, saved: directory === "" ? null : directory, status: t("saved"), tone: "ok", busy: false });
 						},
 						function (error) {
-							update({ busy: false, status: t("saveFailed") + "：" + messageOf(error), tone: "error" });
+							update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
 						}
 					);
 				}
@@ -265,7 +314,7 @@ window.__ModuleLoader__.load({
 							setState({ value: "", saved: null, status: t("cleared"), tone: "ok", busy: false });
 						},
 						function (error) {
-							update({ busy: false, status: t("saveFailed") + "：" + messageOf(error), tone: "error" });
+							update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
 						}
 					);
 				}

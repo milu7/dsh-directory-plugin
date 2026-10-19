@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, test } from "node:test";
 import worker from "../lib/dialog-worker.cjs";
 
-const { createPost, runFolderDialog } = worker;
+const { createPost, errorMessageOf, runFolderDialog } = worker;
 
 describe("createPost：只有终止消息才结束会话", () => {
 	test("IPC：showing 之后不断开，done 之后才断开", () => {
@@ -47,28 +47,62 @@ describe("createPost：只有终止消息才结束会话", () => {
 	});
 });
 
-describe("runFolderDialog：showing 里的起始目录诊断（设置页据此判断是否回退）", () => {
-	function fakeBindings() {
-		return {
-			setThreadDpiAwareness() {},
-			coInitializeSta: () => 0,
-			coUninitialize() {},
-			currentThreadId: () => 1,
-			pressAltForForeground() {},
-			displayPathOf: (item) => ({ hr: 0, path: item.path }),
-			shellItemFromPath: (directory) => ({ hr: 0, item: { path: directory } }),
-			release() {},
-			createFolderDialog: () => ({
-				setOptions: () => 0,
-				setTitle: () => 0,
-				setFolder: () => 0,
-				show: () => 0,
-				resultPath: () => ({ hr: 0, path: "D:\\Picked" }),
-				release() {}
-			})
-		};
-	}
+describe("errorMessageOf：报错只带 message，堆栈另放", () => {
+	test("Error：message 不含堆栈，stack 单独给宿主写日志", () => {
+		const message = errorMessageOf(new Error("CoInitializeEx failed: HRESULT 0x80010106"));
+		assert.equal(message.kind, "error");
+		assert.equal(message.message, "CoInitializeEx failed: HRESULT 0x80010106");
+		assert.match(message.stack, /^Error: CoInitializeEx failed[^\n]*\n\s+at /);
+	});
 
+	test("抛出的不是 Error 时转成字符串", () => {
+		assert.deepEqual(errorMessageOf("boom"), { kind: "error", message: "boom" });
+	});
+});
+
+/** 不碰 Win32 的绑定替身；calls 记录对话框收到的调用。 */
+function fakeBindings(calls = []) {
+	return {
+		setThreadDpiAwareness() {},
+		coInitializeSta: () => 0,
+		coUninitialize() {},
+		currentThreadId: () => 1,
+		pressAltForForeground() {},
+		displayPathOf: (item) => ({ hr: 0, path: item.path }),
+		shellItemFromPath: (directory) => ({ hr: 0, item: { path: directory } }),
+		release() {},
+		createFolderDialog: () => ({
+			setOptions: (options) => (calls.push(["setOptions", options]), 0),
+			setTitle: (title) => (calls.push(["setTitle", title]), 0),
+			setFolder: () => 0,
+			show: () => 0,
+			resultPath: () => ({ hr: 0, path: "D:\\Picked" }),
+			release() {}
+		})
+	};
+}
+
+describe("runFolderDialog：标题", () => {
+	test("给了标题就设置", () => {
+		const calls = [];
+		runFolderDialog(fakeBindings(calls), "选择新工作区所在文件夹", undefined, () => {});
+		assert.deepEqual(
+			calls.filter(([name]) => name === "setTitle"),
+			[["setTitle", "选择新工作区所在文件夹"]]
+		);
+	});
+
+	test("没给标题就不调 SetTitle，保留系统自带的（已本地化的）标题", () => {
+		const calls = [];
+		runFolderDialog(fakeBindings(calls), "", undefined, () => {});
+		assert.deepEqual(
+			calls.filter(([name]) => name === "setTitle"),
+			[]
+		);
+	});
+});
+
+describe("runFolderDialog：showing 里的起始目录诊断（设置页据此判断是否回退）", () => {
 	test("没配置起始目录：requested 为 null", () => {
 		let reported;
 		const picked = runFolderDialog(fakeBindings(), "title", undefined, (_threadId, folder) => {
