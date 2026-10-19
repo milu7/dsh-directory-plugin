@@ -29,3 +29,15 @@ test("vendor 只带运行时会加载的文件（koffi 的 C++ 源码、头文�
 		"node_modules/koffi/src/koffi/src/static.cjs"
 	]);
 });
+
+test("README 的示意图不超过 1760 宽（页面按 880 宽显示，两倍图就够清晰）", () => {
+	const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+	const images = filesUnder(path.join(ROOT, "docs", "images"));
+	assert.ok(images.length > 0);
+	for (const name of images) {
+		const png = fs.readFileSync(path.join(ROOT, "docs", "images", name));
+		assert.equal(png.toString("latin1", 1, 4), "PNG", name);
+		assert.ok(png.readUInt32BE(16) <= 1760, name + " 宽 " + png.readUInt32BE(16));
+		assert.ok(readme.includes("docs/images/" + name), "README 没有用到 " + name);
+	}
+});
