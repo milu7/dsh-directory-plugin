@@ -191,7 +191,8 @@ describe("runPick：和 worker 之间的 IPC", () => {
 		assert.deepEqual(await runPick("D:\\Configured", fake), {
 			path: "D:\\Picked",
 			initialFolder: { requested: "D:\\Configured", applied: true },
-			owner: null
+			owner: null,
+			koffi: "fake-koffi"
 		});
 	});
 

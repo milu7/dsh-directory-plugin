@@ -210,13 +210,15 @@ describe("POST /pick", () => {
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		assert.equal(spawnCalls.length, 1, "同用途不应再起一个进程");
 
-		child.emit("message", { kind: "showing", initialFolder: { requested: null, applied: false } });
+		child.emit("message", { kind: "showing", initialFolder: { requested: null, applied: false }, owner: "4242", koffi: "C:\\vendor\\koffi\\index.cjs" });
 		child.emit("message", { kind: "done", path: "D:\\Picked" });
 		for (const result of [await workspace, await again]) {
 			assert.equal(result.status, 200);
 			assert.equal(result.body.path, "D:\\Picked");
 			assert.deepEqual(result.body.initialFolder, { requested: null, applied: false });
 		}
+		// 实测时靠这一行确认：对话框以 DSH 窗口为父窗口，用的是哪一份 koffi。
+		assert.ok(readLog().includes("pick D:\\Picked purpose=workspace owner=4242 koffi=C:\\vendor\\koffi\\index.cjs initial="), readLog());
 	});
 
 	test("输入框里的目录写法不对：400，不起进程", async () => {

@@ -31,7 +31,7 @@ process.on("disconnect", () => process.exit(0));
 const mode = process.env.FAKE_WORKER_MODE ?? "";
 const requested = (process.env.DSH_DIALOG_INITIAL_DIR ?? "").trim() || null;
 const owner = mode.startsWith("owner-") ? "4242" : null;
-post({ kind: "showing", initialFolder: { requested, applied: requested !== null }, owner });
+post({ kind: "showing", initialFolder: { requested, applied: requested !== null }, owner, koffi: "fake-koffi" });
 
 if (mode === "exit-early" || mode === "owner-crash") process.exit(3);
 else if (mode === "error") post(errorMessageOf(new Error("boom")));
