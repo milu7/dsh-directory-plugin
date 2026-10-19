@@ -199,7 +199,9 @@ window.__ModuleLoader__.load({
 								update({ busy: false, status: t("pickFailed") + "：" + data.error, tone: "error" });
 								return;
 							}
-							var fellBack = data && data.initialFolder && data.initialFolder.applied === false;
+							var info = data && data.initialFolder;
+							// 只有确实配置了起始目录、却没能用上时才算回退；没配置时 worker 报的是 requested: null。
+							var fellBack = !!(info && info.requested && info.applied === false);
 							var hint = fellBack ? t("fallbackHint") : "";
 							if (data && typeof data.path === "string" && data.path !== "") update({ value: data.path, busy: false, status: hint, tone: fellBack ? "error" : "muted" });
 							else update({ busy: false, status: hint, tone: fellBack ? "error" : "muted" });
