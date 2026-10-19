@@ -79,7 +79,10 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 ```
 
 旧版本（`workspace-anchor.json` / `default-workspace-directory.json`）的配置会在首次读取时
-自动迁移，无需手动处理。
+自动迁移，无需手动处理；迁移完成后旧文件改名为 `*.migrated` 保留。
+
+手动编辑时注意 JSON 里的反斜杠要写成 `\\`。文件写坏时插件按「未设置」处理并在日志里记一条
+`config-corrupt`，不会覆盖你的文件；改好或在设置页重新保存即可。
 
 ## 工作原理
 
@@ -96,6 +99,9 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 `CoCreateInstance(FileOpenDialog)` → `SHCreateItemFromParsingName` 造 `IShellItem` →
 `IFileDialog::SetFolder`（vtable 第 12 槽）→ `Show()`。失败时客户端回退到桌面端内置的
 `__DSH_DIRECTORY_PICKER__`。
+
+两个路由只服务 DSH 自己的页面：浏览器标为跨站的请求返回 403，POST 必须是
+`application/json`（否则 415），`/pick` 只接受 POST——避免任意网页跨站调用它们。
 
 <p align="center">
   <img src="docs/images/how-it-works.png" alt="弹框链路：客户端槽位 → 宿主路由 → Worker → Win32 COM → 原生选择框" width="880">
@@ -115,6 +121,8 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。
 | `pick D:\Projects\demo initial={"applied":true,...}` | 选择框确实以配置目录为起点 |
 | `pick (cancelled) ...` | 用户取消了 |
 | `pick-failed ...` | 对话框进程出错，界面会回退到系统默认行为 |
+| `config-corrupt <文件> <原因>` | 配置文件不是合法 JSON（多半是反斜杠没写成 `\\`），已按未设置处理，文件原样保留 |
+| `config-write-failed ...` | 保存配置失败（多为文件被其他程序占用），设置页会显示错误，稍后重试即可 |
 
 判断是否生效：
 
@@ -149,6 +157,7 @@ lib/index.js            宿主插件：HTTP 路由
 lib/core.js             配置读写 + 拉起对话框子进程
 lib/dialog-worker.cjs   Win32 文件夹对话框 worker（支持起始目录）
 client/client.js        浏览器 bundle：接管目录流程 + 设置页
+test/                   node:test 用例（npm test，需要 Node 22+；不会弹出真实对话框）
 vendor/                 随包携带的 koffi 3.1.1
 docs/images/            README 示意图（overview / settings / how-it-works）
 LICENSE                 MIT
