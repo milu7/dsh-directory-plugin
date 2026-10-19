@@ -36,7 +36,9 @@ window.__ModuleLoader__.load({
 			loadFailed: "读取配置失败：",
 			saveFailed: "保存失败：",
 			pickFailed: "打开选择框失败：",
-			fallbackHint: "配置的目录已不存在或无法打开，选择框已回退到系统默认位置",
+			fallbackHint: "起始目录已不存在或无法打开，选择框已回退到系统默认位置",
+			unsaved: "已选好，点「保存」后生效",
+			unsupported: "目录插件只支持 Windows。在当前系统上，「新建工作区」会继续使用 DSH 自带的选择框。",
 			dialogTitleWorkspace: "选择新工作区所在文件夹",
 			dialogTitleSettings: "选择默认打开的目录",
 			// 宿主返回的错误码对应的文案；后面直接接上 detail（路径、底层错误）。
@@ -48,7 +50,9 @@ window.__ModuleLoader__.load({
 			errSaveFailed: "写入配置文件失败：",
 			errPickTimeout: "选择框启动超时",
 			errPickExited: "选择框进程意外退出：",
-			errPickFailed: "原生选择框出错："
+			errPickFailed: "原生选择框出错：",
+			errBusy: "已经有一个文件夹选择框开着，请先关掉它",
+			errUnsupported: "只支持 Windows"
 		};
 		var en = {
 			nav: "Workspace folder",
@@ -68,7 +72,9 @@ window.__ModuleLoader__.load({
 			loadFailed: "Failed to read settings: ",
 			saveFailed: "Failed to save: ",
 			pickFailed: "Failed to open the chooser: ",
-			fallbackHint: "The configured folder is gone, so the chooser opened at the system default",
+			fallbackHint: "The starting folder is gone or can't be opened, so the chooser opened at the system default",
+			unsaved: "Selected. Click Save to apply it",
+			unsupported: "This plugin only works on Windows. On this system, New Workspace keeps using DSH's built-in folder chooser.",
 			dialogTitleWorkspace: "Choose a folder for the new workspace",
 			dialogTitleSettings: "Choose the default starting folder",
 			errNotString: "The folder must be text",
@@ -79,7 +85,9 @@ window.__ModuleLoader__.load({
 			errSaveFailed: "Could not write the settings file: ",
 			errPickTimeout: "The folder chooser did not start in time",
 			errPickExited: "The folder chooser process exited unexpectedly: ",
-			errPickFailed: "The native folder chooser failed: "
+			errPickFailed: "The native folder chooser failed: ",
+			errBusy: "Another folder chooser is already open. Close it first",
+			errUnsupported: "Only available on Windows"
 		};
 
 		/** 宿主错误码 → 文案 key。没列出来的（跨站、请求格式不对等）只会出在调用方写错时，直接显示英文说明。 */
@@ -92,7 +100,9 @@ window.__ModuleLoader__.load({
 			"save-failed": "errSaveFailed",
 			"pick-timeout": "errPickTimeout",
 			"pick-exited": "errPickExited",
-			"pick-failed": "errPickFailed"
+			"pick-failed": "errPickFailed",
+			busy: "errBusy",
+			unsupported: "errUnsupported"
 		};
 
 		/* 设置页样式：放在组件外面，每次渲染复用同一批对象。 */
@@ -156,10 +166,11 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * 用宿主路由打开原生选择框。
-		 * @param {string | undefined} title - 对话框标题；不给就用系统自带的。
+		 * @param {{purpose: string, title?: string, initialDirectory?: string}} request - purpose：
+		 *   "workspace" 或 "settings"；title 不给就用系统自带的；initialDirectory 不给就从已保存的目录开始。
 		 */
-		function pickViaHost(title) {
-			return requestJson("/pick", { method: "POST", body: JSON.stringify({ title: title }) });
+		function pickViaHost(request) {
+			return requestJson("/pick", { method: "POST", body: JSON.stringify(request) });
 		}
 
 		/** 回退：桌面端预加载的 __DSH_DIRECTORY_PICKER__（系统默认位置）。 */
@@ -228,14 +239,16 @@ window.__ModuleLoader__.load({
 								report(describe(reason));
 							});
 						}
-						pickViaHost(dialogTitle("dialogTitleWorkspace")).then(
+						pickViaHost({ purpose: "workspace", title: dialogTitle("dialogTitleWorkspace") }).then(
 							function (data) {
 								if (!alive) return;
 								picked(data && data.path);
 							},
 							function (error) {
 								if (!alive) return;
-								fallback(error);
+								// 设置页的选择框正开着：直接告诉用户，不再弹出第二个（DSH 自带的）框。
+								if (error && error.code === "busy") report(describe(error));
+								else fallback(error);
 							}
 						);
 						return function () {
@@ -249,27 +262,9 @@ window.__ModuleLoader__.load({
 
 			/** 设置页入口。 */
 			function SettingsPage() {
-				var pair = react.useState({ value: "", saved: null, status: "", tone: "muted", busy: false });
+				var pair = react.useState({ value: "", saved: null, status: "", tone: "muted", busy: false, supported: true });
 				var state = pair[0];
 				var setState = pair[1];
-
-				react.useEffect(function () {
-					var alive = true;
-					requestJson("/config", { method: "GET" }).then(
-						function (data) {
-							if (!alive) return;
-							var directory = typeof data.directory === "string" ? data.directory : "";
-							setState({ value: directory, saved: directory === "" ? null : directory, status: "", tone: "muted", busy: false });
-						},
-						function (error) {
-							if (!alive) return;
-							setState({ value: "", saved: null, status: t("loadFailed") + describe(error), tone: "error", busy: false });
-						}
-					);
-					return function () {
-						alive = false;
-					};
-				}, []);
 
 				function update(patch) {
 					setState(function (prev) {
@@ -277,16 +272,45 @@ window.__ModuleLoader__.load({
 					});
 				}
 
+				react.useEffect(function () {
+					var alive = true;
+					requestJson("/config", { method: "GET" }).then(
+						function (data) {
+							if (!alive) return;
+							var directory = typeof data.directory === "string" ? data.directory : "";
+							update({ value: directory, saved: directory === "" ? null : directory, status: "", tone: "muted", busy: false, supported: data.supported !== false });
+						},
+						function (error) {
+							if (!alive) return;
+							update({ value: "", saved: null, status: t("loadFailed") + describe(error), tone: "error", busy: false });
+						}
+					);
+					return function () {
+						alive = false;
+					};
+				}, []);
+
 				function browse() {
 					update({ busy: true, status: t("browsing"), tone: "muted" });
-					pickViaHost(dialogTitle("dialogTitleSettings")).then(
+					// 从输入框里的当前值打开（可能还没保存）；输入框空着就从已保存的目录打开。
+					var typed = state.value.trim();
+					pickViaHost({ purpose: "settings", title: dialogTitle("dialogTitleSettings"), initialDirectory: typed === "" ? undefined : typed }).then(
 						function (data) {
 							var info = data && data.initialFolder;
-							// 只有确实配置了起始目录、却没能用上时才算回退；没配置时 worker 报的是 requested: null。
+							// 只有确实请求了起始目录、却没能用上时才算回退；没配置时 worker 报的是 requested: null。
 							var fellBack = !!(info && info.requested && info.applied === false);
-							var hint = fellBack ? t("fallbackHint") : "";
-							if (data && typeof data.path === "string" && data.path !== "") update({ value: data.path, busy: false, status: hint, tone: fellBack ? "error" : "muted" });
-							else update({ busy: false, status: hint, tone: fellBack ? "error" : "muted" });
+							var path = data && typeof data.path === "string" && data.path !== "" ? data.path : null;
+							setState(function (prev) {
+								if (path !== null && path !== prev.saved) {
+									return Object.assign({}, prev, { value: path, busy: false, status: t("unsaved"), tone: "muted" });
+								}
+								return Object.assign({}, prev, {
+									value: path === null ? prev.value : path,
+									busy: false,
+									status: fellBack ? t("fallbackHint") : "",
+									tone: fellBack ? "error" : "muted"
+								});
+							});
 						},
 						function (error) {
 							update({ busy: false, status: t("pickFailed") + describe(error), tone: "error" });
@@ -299,7 +323,7 @@ window.__ModuleLoader__.load({
 					requestJson("/config", { method: "POST", body: JSON.stringify({ directory: state.value }) }).then(
 						function (data) {
 							var directory = data && typeof data.directory === "string" ? data.directory : "";
-							setState({ value: directory, saved: directory === "" ? null : directory, status: t("saved"), tone: "ok", busy: false });
+							update({ value: directory, saved: directory === "" ? null : directory, status: t("saved"), tone: "ok", busy: false });
 						},
 						function (error) {
 							update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
@@ -311,12 +335,17 @@ window.__ModuleLoader__.load({
 					update({ busy: true, status: t("saving"), tone: "muted" });
 					requestJson("/config", { method: "POST", body: JSON.stringify({ directory: "" }) }).then(
 						function () {
-							setState({ value: "", saved: null, status: t("cleared"), tone: "ok", busy: false });
+							update({ value: "", saved: null, status: t("cleared"), tone: "ok", busy: false });
 						},
 						function (error) {
 							update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
 						}
 					);
+				}
+
+				// 宿主不是 Windows：只说明情况，不显示用不了的输入框和按钮。
+				if (!state.supported) {
+					return h("div", { style: PAGE_STYLE }, h("h3", { style: TITLE_STYLE }, t("title")), h("p", { style: HINT_STYLE }, t("unsupported")));
 				}
 
 				var buttonStyle = state.busy ? BUSY_BUTTON_STYLE : BUTTON_STYLE;
