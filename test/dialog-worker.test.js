@@ -7,10 +7,11 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import worker from "../lib/dialog-worker.cjs";
 
-const { FOLDER_DIALOG_OPTIONS, HRESULT_CANCELLED, createPost, errorMessageOf, loadKoffi, loadWin32DialogBindings, runFolderDialog } = worker;
+const { FOLDER_DIALOG_OPTIONS, HRESULT_CANCELLED, createPost, dshOwnerWindow, errorMessageOf, loadKoffi, loadWin32DialogBindings, reenableOwner, runFolderDialog } = worker;
 const VENDORED_KOFFI = fileURLToPath(new URL("../vendor/node_modules/koffi/index.cjs", import.meta.url));
 const WORKER = fileURLToPath(new URL("../lib/dialog-worker.cjs", import.meta.url));
 const windowsOnly = { skip: process.platform !== "win32" && "要调真实的 Win32 API" };
+const DSH_EXE = "D:\\DSH Next\\DSH NEXT.exe";
 
 describe("createPost：只有终止消息才结束会话", () => {
 	test("IPC：showing 之后不断开，done 之后才断开", () => {
@@ -52,13 +53,21 @@ describe("errorMessageOf：报错只带 message，堆栈另放", () => {
 	});
 });
 
-/** 不碰 Win32 的绑定替身。calls 记录对话框收到的调用。 */
-function fakeBindings({ calls = [], options = 0, show = 0 } = {}) {
+/**
+ * 不碰 Win32 的绑定替身。calls 记录对话框和窗口收到的调用；
+ * windows 描述现有的窗口：hwnd → { exe, enabled }。
+ */
+function fakeBindings({ calls = [], options = 0, foreground = null, windows = {}, show = 0 } = {}) {
+	const windowOf = (hwnd) => windows[String(hwnd)];
 	return {
 		setThreadDpiAwareness() {},
 		coInitializeSta: () => 0,
 		coUninitialize() {},
-		pressAltForForeground: () => calls.push(["pressAlt"]),
+		foregroundRootWindow: () => foreground,
+		processImageOfWindow: (hwnd) => windowOf(hwnd)?.exe ?? null,
+		isWindow: (hwnd) => windowOf(hwnd) !== undefined,
+		isWindowEnabled: (hwnd) => windowOf(hwnd)?.enabled !== false,
+		enableWindow: (hwnd) => calls.push(["enableWindow", hwnd]),
 		displayPathOf: (item) => ({ hr: 0, path: item.path }),
 		shellItemFromPath: (directory) => ({ hr: 0, item: { path: directory } }),
 		release() {},
@@ -120,6 +129,55 @@ describe("runFolderDialog：选项与返回值", () => {
 
 	test("选中时返回路径", () => {
 		assert.equal(run(fakeBindings()), "D:\\Picked");
+	});
+});
+
+describe("runFolderDialog：父窗口（第 14 条：代替模拟按 Alt）", () => {
+	test("前台是 DSH 自己的窗口：以它为父窗口（模态），并在 showing 里报告", () => {
+		const calls = [];
+		let reported;
+		const bindings = fakeBindings({ calls, foreground: 7n, windows: { 7: { exe: DSH_EXE } } });
+		run(bindings, { dshExe: "d:\\dsh next\\DSH NEXT.EXE" }, (_folder, owner) => (reported = owner));
+		assert.deepEqual(callsNamed(calls, "show"), [["show", 7n]]);
+		assert.equal(reported, "7");
+	});
+
+	test("前台是别的程序（用户切走了）：不设父窗口，也不抢前台", () => {
+		const calls = [];
+		let reported;
+		const bindings = fakeBindings({ calls, foreground: 9n, windows: { 9: { exe: "C:\\Windows\\explorer.exe" } } });
+		run(bindings, { dshExe: DSH_EXE }, (_folder, owner) => (reported = owner));
+		assert.deepEqual(callsNamed(calls, "show"), [["show", null]]);
+		assert.equal(reported, null);
+	});
+
+	test("没有前台窗口、读不到进程路径、没给 DSH 路径：都不设父窗口", () => {
+		assert.equal(dshOwnerWindow(fakeBindings({ foreground: null }), DSH_EXE), null);
+		assert.equal(dshOwnerWindow(fakeBindings({ foreground: 7n, windows: { 7: {} } }), DSH_EXE), null);
+		assert.equal(dshOwnerWindow(fakeBindings({ foreground: 7n, windows: { 7: { exe: DSH_EXE } } }), ""), null);
+	});
+});
+
+describe("reenableOwner：worker 崩溃后恢复被禁用的 DSH 窗口", () => {
+	test("还是被禁用的 DSH 窗口：重新启用", () => {
+		const calls = [];
+		const bindings = fakeBindings({ calls, windows: { 1234: { exe: DSH_EXE, enabled: false } } });
+		assert.equal(reenableOwner(bindings, "1234", DSH_EXE), true);
+		assert.deepEqual(calls, [["enableWindow", 1234n]]);
+	});
+
+	test("已经是启用的、窗口没了、句柄被别的程序复用了、句柄不是数字：什么都不做", () => {
+		const calls = [];
+		const bindings = fakeBindings({
+			calls,
+			windows: { 1: { exe: DSH_EXE, enabled: true }, 2: { exe: "C:\\Other\\app.exe", enabled: false } }
+		});
+		assert.equal(reenableOwner(bindings, "1", DSH_EXE), false);
+		assert.equal(reenableOwner(bindings, "3", DSH_EXE), false);
+		assert.equal(reenableOwner(bindings, "2", DSH_EXE), false);
+		assert.equal(reenableOwner(bindings, "-1", DSH_EXE), false);
+		assert.equal(reenableOwner(bindings, "0x10", DSH_EXE), false);
+		assert.deepEqual(calls, []);
 	});
 });
 
@@ -226,9 +284,31 @@ describe("Win32 绑定冒烟测试（真实 API，但不调用 Show，不会弹�
 		}
 	});
 
+	test("真实 worker 进程：修复模式能加载 koffi 并正常退出（句柄 0 不是窗口，什么都不改）", () => {
+		const result = spawnSync(process.execPath, [WORKER], {
+			env: { ...process.env, DSH_DIALOG_REENABLE_OWNER: "0", DSH_KOFFI_PATH: VENDORED_KOFFI },
+			encoding: "utf8",
+			windowsHide: true
+		});
+		assert.equal(result.stderr, "");
+		assert.equal(result.status, 0);
+	});
+
 	test("真实 worker 进程：没有 IPC 通道时直接报错退出，不会弹框", () => {
 		const result = spawnSync(process.execPath, [WORKER], { env: { ...process.env, DSH_KOFFI_PATH: VENDORED_KOFFI }, encoding: "utf8", windowsHide: true });
 		assert.notEqual(result.status, 0);
 		assert.match(result.stderr, /must be spawned with an IPC channel/);
+	});
+
+	test("前台窗口和它所属进程的 exe 路径读得出来（只读，不改窗口状态）", () => {
+		withBindings((bindings) => {
+			const window = bindings.foregroundRootWindow();
+			if (window === null) return; // 锁屏等情况下没有前台窗口
+			assert.equal(typeof window, "bigint");
+			assert.equal(bindings.isWindow(window), true);
+			const image = bindings.processImageOfWindow(window);
+			if (image !== null) assert.match(image, /^[a-z]:\\.+\.exe$/i);
+			assert.equal(bindings.isWindow(0n), false);
+		});
 	});
 });

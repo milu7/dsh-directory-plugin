@@ -190,7 +190,8 @@ describe("runPick：和 worker 之间的 IPC", () => {
 		process.env.FAKE_WORKER_MODE = "yield";
 		assert.deepEqual(await runPick("D:\\Configured", fake), {
 			path: "D:\\Picked",
-			initialFolder: { requested: "D:\\Configured", applied: true }
+			initialFolder: { requested: "D:\\Configured", applied: true },
+			owner: null
 		});
 	});
 
@@ -219,6 +220,44 @@ describe("runPick：和 worker 之间的 IPC", () => {
 		process.env.FAKE_WORKER_MODE = "echo-title";
 		assert.equal((await runPick(null, { ...fake, title: "选择新工作区所在文件夹" })).path, "选择新工作区所在文件夹");
 		assert.equal((await runPick(null, fake)).path, null);
+	});
+});
+
+describe("runPick：模态对话框开着时 worker 死掉（第 14 条的后手）", () => {
+	const fake = { workerPath: FAKE_WORKER };
+	const marker = () => path.join(home, "reenabled-owner");
+	beforeEach(() => {
+		process.env.FAKE_WORKER_MARKER = marker();
+	});
+	afterEach(() => {
+		delete process.env.FAKE_WORKER_MARKER;
+	});
+
+	async function markerAfter(ms) {
+		for (let waited = 0; waited < ms; waited += 20) {
+			if (fs.existsSync(marker())) return fs.readFileSync(marker(), "utf8");
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		return null;
+	}
+
+	test("报告过父窗口后异常退出：起修复模式的 worker 把那个窗口重新启用", async () => {
+		process.env.FAKE_WORKER_MODE = "owner-crash";
+		await assert.rejects(runPick(null, fake), { code: "pick-exited" });
+		assert.equal(await markerAfter(3000), "4242");
+		assert.match(readLog(), /owner-reenable 4242/);
+	});
+
+	test("有父窗口但正常结束：不修复；结果里带着父窗口（写进日志用）", async () => {
+		process.env.FAKE_WORKER_MODE = "owner-done";
+		assert.equal((await runPick(null, fake)).owner, "4242");
+		assert.equal(await markerAfter(300), null);
+	});
+
+	test("没有父窗口时异常退出：没有要恢复的窗口", async () => {
+		process.env.FAKE_WORKER_MODE = "exit-early";
+		await assert.rejects(runPick(null, fake), { code: "pick-exited" });
+		assert.equal(await markerAfter(300), null);
 	});
 });
 
