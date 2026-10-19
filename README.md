@@ -148,7 +148,8 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。worker 只
 
 ## 兼容性
 
-- Windows 10 / 11，x64（`vendor` 内置的是 win32-x64 的 koffi 二进制）。
+- Windows 10 / 11，x64（`vendor` 内置的是 win32-x64 的 koffi 二进制）。ARM64 上会改用 DSH 安装目录
+  里自带的 koffi，这条路径没有在 ARM64 机器上实测过。
 - 其他系统上插件能装上但不生效：设置页只显示一行说明，「新建工作区」继续用 DSH 自带的
   选择框，也不会去起注定失败的对话框进程。
 - 依赖 DSH 桌面端（Next 内核）的槽位与客户端插件加载机制；如果未来版本移除或重命名这些
@@ -175,7 +176,7 @@ lib/core.js             配置读写 + 拉起对话框子进程
 lib/dialog-worker.cjs   Win32 文件夹对话框 worker（支持起始目录）
 client/client.js        浏览器 bundle：接管目录流程 + 设置页
 test/                   node:test 用例（npm test，需要 Node 22+；不会弹出真实对话框）
-vendor/                 随包携带的 koffi 3.1.1
+vendor/                 随包携带的 koffi 3.1.1（只留运行时会加载的 8 个文件，约 1MB）
 docs/images/            README 示意图（overview / settings / how-it-works）
 LICENSE                 MIT
 ```
