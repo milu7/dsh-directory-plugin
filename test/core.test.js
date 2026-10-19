@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { lastPickInfo, normalizeDialogTitle, normalizeDirectory, readSettings, runPick, writeSettings } from "../lib/core.js";
+import { normalizeDialogTitle, normalizeDirectory, parseDirectory, pickDirectory, readSettings, runPick, writeSettings } from "../lib/core.js";
+import { onPlatform } from "./helpers.js";
 
 const FAKE_WORKER = fileURLToPath(new URL("./fixtures/fake-worker.cjs", import.meta.url));
 const windowsOnly = { skip: process.platform !== "win32" && "Windows 专属的路径写法" };
@@ -110,6 +111,12 @@ describe("normalizeDirectory：只接受完整的绝对路径", () => {
 	test("接受正斜杠写法并规范化", windowsOnly, () => {
 		assert.equal(normalizeDirectory(home.replaceAll("\\", "/") + "/"), home);
 	});
+
+	test("parseDirectory 只检查写法，不要求目录存在", () => {
+		const missing = path.join(home, "missing");
+		assert.equal(parseDirectory(`"${missing}"`), missing);
+		assert.throws(() => parseDirectory("Projects"), { code: "not-absolute" });
+	});
 });
 
 describe("normalizeDialogTitle：客户端传来的对话框标题", () => {
@@ -133,15 +140,21 @@ describe("normalizeDialogTitle：客户端传来的对话框标题", () => {
 describe("runPick：和 worker 之间的 IPC", () => {
 	const fake = { workerPath: FAKE_WORKER };
 
-	test("showing 之后 worker 让出了事件循环，选择结果依然送达", async () => {
+	test("showing 之后 worker 让出了事件循环，选择结果依然送达，并带上起始目录诊断", async () => {
 		process.env.FAKE_WORKER_MODE = "yield";
-		assert.equal(await runPick("D:\\Configured", fake), "D:\\Picked");
-		assert.deepEqual(lastPickInfo(), { requested: "D:\\Configured", applied: true });
+		assert.deepEqual(await runPick("D:\\Configured", fake), {
+			path: "D:\\Picked",
+			initialFolder: { requested: "D:\\Configured", applied: true }
+		});
 	});
 
-	test("worker 中途退出时报错（pick-exited，detail 是退出码），而不是一直挂着", async () => {
+	test("worker 中途退出时报错（pick-exited，detail 是退出码），错误上带着已回报的诊断", async () => {
 		process.env.FAKE_WORKER_MODE = "exit-early";
-		await assert.rejects(runPick(null, fake), { code: "pick-exited", detail: "3" });
+		await assert.rejects(runPick(null, fake), {
+			code: "pick-exited",
+			detail: "3",
+			initialFolder: { requested: null, applied: false }
+		});
 	});
 
 	test("worker 报错时只带 message，堆栈单独放在 workerStack 上", async () => {
@@ -158,7 +171,32 @@ describe("runPick：和 worker 之间的 IPC", () => {
 
 	test("标题原样交给 worker；不给标题时 worker 收到空串", async () => {
 		process.env.FAKE_WORKER_MODE = "echo-title";
-		assert.equal(await runPick(null, { ...fake, title: "选择新工作区所在文件夹" }), "选择新工作区所在文件夹");
-		assert.equal(await runPick(null, fake), null);
+		assert.equal((await runPick(null, { ...fake, title: "选择新工作区所在文件夹" })).path, "选择新工作区所在文件夹");
+		assert.equal((await runPick(null, fake)).path, null);
+	});
+});
+
+describe("pickDirectory：同一时刻只有一个对话框", () => {
+	const fake = { workerPath: FAKE_WORKER };
+
+	test("用途相同的并发请求共用一个对话框的结果", async () => {
+		process.env.FAKE_WORKER_MODE = "yield";
+		const first = pickDirectory(null, { ...fake, purpose: "workspace" });
+		const second = pickDirectory(null, { ...fake, purpose: "workspace" });
+		assert.equal(second, first);
+		assert.equal((await first).path, "D:\\Picked");
+	});
+
+	test("用途不同时以 busy 拒绝，对话框关掉之后又能正常打开", async () => {
+		process.env.FAKE_WORKER_MODE = "yield";
+		const workspace = pickDirectory(null, { ...fake, purpose: "workspace" });
+		await assert.rejects(pickDirectory(null, { ...fake, purpose: "settings" }), { code: "busy" });
+		await workspace;
+		assert.equal((await pickDirectory(null, { ...fake, purpose: "settings" })).path, "D:\\Picked");
+	});
+
+	test("不是 Windows 时直接报 unsupported，不起进程", async (t) => {
+		onPlatform(t, "linux");
+		await assert.rejects(pickDirectory(null, { workerPath: path.join(home, "no-such-worker.cjs") }), { code: "unsupported" });
 	});
 });

@@ -286,15 +286,66 @@ describe("错误码与多语言", () => {
 			},
 			{ translate }
 		);
-		assert.deepEqual(page.requests.at(-1), { key: "POST " + PICK, body: { title: "<dialogTitleSettings>" } });
+		assert.deepEqual(page.requests.at(-1), { key: "POST " + PICK, body: { purpose: "settings", title: "<dialogTitleSettings>" } });
 
 		const flow = await openFlowOnce({ translate, replies: { ["POST " + PICK]: { path: null } } });
-		assert.deepEqual(flow.requests[0].body, { title: "<dialogTitleWorkspace>" });
+		assert.deepEqual(flow.requests[0].body, { purpose: "workspace", title: "<dialogTitleWorkspace>" });
 	});
 
 	test("词典没注册上（t 原样返回 key）时不传标题，让系统用自带的", async () => {
 		const flow = await openFlowOnce({ replies: { ["POST " + PICK]: { path: null } } });
-		assert.deepEqual(flow.requests[0].body, {});
+		assert.deepEqual(flow.requests[0].body, { purpose: "workspace" });
+	});
+});
+
+describe("设置页的「浏览…」", () => {
+	test("从输入框里还没保存的目录打开；选了别的目录后提示还没保存", async () => {
+		const page = await openSettings({
+			["GET " + CONFIG]: { directory: "D:\\Saved" },
+			["POST " + PICK]: { path: "D:\\Typed\\Child", directory: "D:\\Saved", initialFolder: { requested: "D:\\Typed", applied: true } }
+		});
+		page.findAll((node) => node.type === "input")[0].props.onChange({ target: { value: "  D:\\Typed " } });
+		page.render();
+		button(page, "browse").props.onClick();
+		await settle();
+		page.render();
+
+		assert.deepEqual(page.requests.at(-1).body, { purpose: "settings", initialDirectory: "D:\\Typed" });
+		assert.equal(page.findAll((node) => node.type === "input")[0].props.value, "D:\\Typed\\Child");
+		assert.equal(statusOf(page), "unsaved");
+		assert.match(textOf(page.findAll((node) => textOf(node).startsWith("current"))[0]), /D:\\Saved$/);
+	});
+
+	test("选回已保存的目录：不提示「尚未保存」", async () => {
+		const page = await browseOnce({
+			["GET " + CONFIG]: { directory: "D:\\Saved" },
+			["POST " + PICK]: { path: "D:\\Saved", directory: "D:\\Saved", initialFolder: { requested: "D:\\Saved", applied: true } }
+		});
+		assert.equal(statusOf(page), "");
+	});
+
+	test("新建工作区的对话框正开着：提示 busy", async () => {
+		const page = await browseOnce({
+			["GET " + CONFIG]: { directory: null },
+			["POST " + PICK]: reply(409, { code: "busy", error: "Another folder dialog is already open (workspace)" })
+		});
+		assert.equal(statusOf(page), "pickFailed" + "errBusy");
+	});
+});
+
+describe("不是 Windows 的宿主", () => {
+	test("设置页只显示说明，不显示输入框和按钮", async () => {
+		const page = await openSettings({ ["GET " + CONFIG]: { directory: null, supported: false } });
+		assert.equal(page.findAll((node) => node.type === "input" || node.type === "button").length, 0);
+		assert.equal(page.findAll((node) => textOf(node) === "unsupported").length, 1);
+	});
+
+	test("新建工作区直接用 DSH 自带的选择框，不报错", async () => {
+		const { calls } = await openFlowOnce({
+			replies: { ["POST " + PICK]: reply(501, { code: "unsupported", error: "Only Windows is supported" }) },
+			globals: { __DSH_DIRECTORY_PICKER__: { pick: async () => "D:\\Bridge" } }
+		});
+		assert.deepEqual(calls, [["picked", "D:\\Bridge"]]);
 	});
 });
 
@@ -321,6 +372,16 @@ describe("directoryFlow 的结果与回退", () => {
 			globals: { __DSH_DIRECTORY_PICKER__: { pick: async () => "D:\Bridge" } }
 		});
 		assert.deepEqual(calls, [["picked", "D:\Bridge"]]);
+	});
+
+	test("设置页的对话框正开着（409 busy）：报告给 onError，不再弹出 DSH 自带的框", async () => {
+		let bridgeCalls = 0;
+		const { calls } = await openFlowOnce({
+			replies: { ["POST " + PICK]: reply(409, { code: "busy", error: "Another folder dialog is already open (settings)" }) },
+			globals: { __DSH_DIRECTORY_PICKER__: { pick: async () => (bridgeCalls++, "D:\\Bridge") } }
+		});
+		assert.deepEqual(calls, [["error", "errBusy"]]);
+		assert.equal(bridgeCalls, 0);
 	});
 
 	test("宿主和内置选择框都不可用：onError 收到翻译后的文案", async () => {

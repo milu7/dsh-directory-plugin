@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
@@ -7,18 +8,24 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import { apply } from "../lib/index.js";
+import { onPlatform } from "./helpers.js";
 
 const CONFIG = "/dsh-directory-plugin/config";
 const PICK = "/dsh-directory-plugin/pick";
 const SAME_ORIGIN_JSON = { "content-type": "application/json", "sec-fetch-site": "same-origin" };
+const windowsOnly = { skip: process.platform !== "win32" && "对话框只在 Windows 上拉起" };
 
 // 这里的用例都不该真的拉起对话框进程；万一校验失效，宁可报错也别弹出真窗口。
-// 记下每次调用，方便检查交给 worker 的环境变量。
+// 记下每次调用，方便检查交给 worker 的环境变量；个别用例把 spawnImpl 换成假的子进程。
+const refuseSpawn = () => {
+	throw new Error("测试中不应拉起对话框进程");
+};
 const spawnCalls = [];
+let spawnImpl = refuseSpawn;
 before(() => {
 	mock.method(childProcess, "spawn", (command, args, options) => {
 		spawnCalls.push({ command, args, options });
-		throw new Error("测试中不应拉起对话框进程");
+		return spawnImpl(command, args, options);
 	});
 	syncBuiltinESMExports();
 });
@@ -32,7 +39,25 @@ beforeEach(() => {
 	home = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-directory-plugin-"));
 	process.env.DSH_HOME = home;
 	spawnCalls.length = 0;
+	spawnImpl = refuseSpawn;
 });
+
+/** 一个什么都不做、等测试替它发消息的「worker 进程」。 */
+function fakeChild() {
+	const child = new EventEmitter();
+	child.kill = () => {};
+	child.disconnect = () => {};
+	return child;
+}
+
+/** 等到 predicate 成立（请求要先读请求体、读配置，几轮事件循环之后才会走到 spawn）。 */
+async function waitFor(predicate, what) {
+	for (let i = 0; i < 200; i++) {
+		if (predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assert.fail("等不到：" + what);
+}
 afterEach(() => {
 	fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });
 });
@@ -148,8 +173,72 @@ describe("POST /config", () => {
 	});
 });
 
+describe("GET /config", () => {
+	test("告诉客户端当前平台是否支持", async () => {
+		const read = await call(CONFIG, { method: "GET", headers: { "sec-fetch-site": "same-origin" } });
+		assert.equal(read.body.supported, process.platform === "win32");
+	});
+
+	test("不是 Windows 时 supported 为 false", async (t) => {
+		onPlatform(t, "linux");
+		const read = await call(CONFIG, { method: "GET", headers: { "sec-fetch-site": "same-origin" } });
+		assert.equal(read.status, 200);
+		assert.equal(read.body.supported, false);
+	});
+});
+
 describe("POST /pick", () => {
-	test("客户端给的标题（去掉控制字符后）交给 worker；失败时只回错误码和说明，不带堆栈", async () => {
+	test("不是 Windows：501 unsupported，不起进程", async (t) => {
+		onPlatform(t, "linux");
+		const result = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "workspace" } });
+		assert.equal(result.status, 501);
+		assert.equal(result.body.code, "unsupported");
+		assert.equal(spawnCalls.length, 0);
+	});
+
+	test("另一个用途的对话框开着时回 409 busy；同用途的请求等着拿同一个结果", windowsOnly, async () => {
+		const child = fakeChild();
+		spawnImpl = () => child;
+		const workspace = call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "workspace" } });
+		await waitFor(() => spawnCalls.length === 1, "第一个对话框进程");
+
+		const settings = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "settings" } });
+		assert.equal(settings.status, 409);
+		assert.equal(settings.body.code, "busy");
+		// 给同用途的第二个请求一点时间走到 pickDirectory：它应该共用第一个对话框，不再起进程。
+		const again = call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "workspace" } });
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(spawnCalls.length, 1, "同用途不应再起一个进程");
+
+		child.emit("message", { kind: "showing", initialFolder: { requested: null, applied: false } });
+		child.emit("message", { kind: "done", path: "D:\\Picked" });
+		for (const result of [await workspace, await again]) {
+			assert.equal(result.status, 200);
+			assert.equal(result.body.path, "D:\\Picked");
+			assert.deepEqual(result.body.initialFolder, { requested: null, applied: false });
+		}
+	});
+
+	test("输入框里的目录写法不对：400，不起进程", async () => {
+		const result = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "settings", initialDirectory: "Projects" } });
+		assert.equal(result.status, 400);
+		assert.equal(result.body.code, "not-absolute");
+		assert.equal(spawnCalls.length, 0);
+	});
+
+	test("从输入框里还没保存的目录打开；目录不存在也照样交给 worker（由它回退并报告）", windowsOnly, async () => {
+		const missing = path.join(home, "missing");
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "settings", initialDirectory: `"${missing}"` } });
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_INITIAL_DIR, missing);
+	});
+
+	test("输入框空着时从已保存的目录打开", windowsOnly, async () => {
+		await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: { directory: home } });
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "settings", initialDirectory: "  " } });
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_INITIAL_DIR, home);
+	});
+
+	test("客户端给的标题（去掉控制字符后）交给 worker；失败时只回错误码和说明，不带堆栈", windowsOnly, async () => {
 		const result = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { title: "选择\n文件夹" } });
 		assert.equal(spawnCalls.length, 1);
 		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_TITLE, "选择 文件夹");
@@ -161,7 +250,7 @@ describe("POST /pick", () => {
 		assert.match(readLog(), /pick-failed pick-failed /);
 	});
 
-	test("没给标题时 worker 收到空串（对话框用系统自带的标题）", async () => {
+	test("没给标题时 worker 收到空串（对话框用系统自带的标题）", windowsOnly, async () => {
 		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
 		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_TITLE, "");
 	});
