@@ -97,7 +97,7 @@ function loadPlugin({ replies = {}, holes = HOLES, globals = {}, translate = (ke
 	const fetch = async (url, init = {}) => {
 		const key = (init.method ?? "GET") + " " + url;
 		const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
-		requests.push({ key, body });
+		requests.push({ key, body, headers: init.headers ?? {} });
 		if (!(key in replies)) throw new Error("unexpected request " + key);
 		const answer = await (typeof replies[key] === "function" ? replies[key](body) : replies[key]);
 		const { status, body: payload } = answer instanceof Reply ? answer : { status: 200, body: answer };
@@ -286,7 +286,7 @@ describe("错误码与多语言", () => {
 			},
 			{ translate }
 		);
-		assert.deepEqual(page.requests.at(-1), { key: "POST " + PICK, body: { purpose: "settings", title: "<dialogTitleSettings>" } });
+		assert.deepEqual(page.requests.at(-1).body, { purpose: "settings", title: "<dialogTitleSettings>" });
 
 		const flow = await openFlowOnce({ translate, replies: { ["POST " + PICK]: { path: null } } });
 		assert.deepEqual(flow.requests[0].body, { purpose: "workspace", title: "<dialogTitleWorkspace>" });
@@ -389,5 +389,36 @@ describe("directoryFlow 的结果与回退", () => {
 			replies: { ["POST " + PICK]: reply(500, { code: "pick-failed", error: "Native folder dialog failed: boom", detail: "boom" }) }
 		});
 		assert.deepEqual(calls, [["error", "errPickFailed" + "boom"]]);
+	});
+});
+
+describe("计时与单飞", () => {
+	test("/pick 带上发起时刻头：宿主据此算这次请求排了多久", async () => {
+		const before = Date.now();
+		const flow = await openFlowOnce({ replies: { ["POST " + PICK]: { path: null } } });
+		const stamp = Number(flow.requests[0].headers["x-dsh-directory-plugin-started-at"]);
+		assert.ok(Number.isFinite(stamp), "请求头里要有毫秒时间戳");
+		assert.ok(stamp >= before && stamp <= Date.now(), "时间戳应当是发起的时刻");
+	});
+
+	test("前一个请求还没回来时，第二个占用者搭车，不会弹第二个框", async () => {
+		let release;
+		const plugin = loadPlugin({ replies: { ["POST " + PICK]: () => new Promise((resolve) => (release = resolve)) } });
+		const seat = () => {
+			const instance = plugin.mount(plugin.components.get(HOLES[0]));
+			const calls = [];
+			instance.render({ open: true, onPicked: (path) => calls.push(path) });
+			return calls;
+		};
+		// 槽位被重新注入 = 新实例，而 open 还是 true：模态框只能有一个。
+		const first = seat();
+		const second = seat();
+		await settle();
+		assert.equal(plugin.requests.length, 1, "同一时刻只该有一个请求");
+		release({ path: "D:\\Picked", directory: null, initialFolder: null });
+		await settle();
+		await settle();
+		assert.deepEqual(first, ["D:\\Picked"]);
+		assert.deepEqual(second, ["D:\\Picked"]);
 	});
 });

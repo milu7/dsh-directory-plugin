@@ -266,3 +266,58 @@ describe("兜底", () => {
 		assert.match(readLog(), /route-failed/);
 	});
 });
+
+describe("同一进程里被挂两次（profile 装了一份，市场又热挂了一份）", () => {
+	test("第二份注册同名路由失败时不抛，只记一条 duplicate-mount", () => {
+		const mounted = [];
+		const context = {
+			inject(_dependencies, callback) {
+				callback({
+					webServer: {
+						register(route) {
+							if (mounted.includes(route.path)) throw new Error('webserver: duplicate exact route "' + route.path + '"');
+							mounted.push(route.path);
+							return () => {};
+						}
+					},
+					effect: (setup) => setup()
+				});
+			}
+		};
+		apply(context);
+		apply(context);
+		assert.deepEqual(mounted, [CONFIG, PICK], "路由只该注册一遍");
+		const log = readLog();
+		assert.match(log, /duplicate-mount \/dsh-directory-plugin\/config /);
+		assert.match(log, /host-routes-registered \/dsh-directory-plugin routes=0/);
+	});
+});
+
+describe("耗时日志", () => {
+	test("/pick 的日志带上请求等待、启动、总时长（响应体不变）", windowsOnly, async () => {
+		spawnImpl = () => {
+			const child = fakeChild();
+			setImmediate(() => {
+				child.emit("message", { kind: "showing", initialFolder: { requested: null, applied: false } });
+				child.emit("message", { kind: "done", path: "D:\\Picked" });
+			});
+			return child;
+		};
+		const headers = { ...SAME_ORIGIN_JSON, "x-dsh-directory-plugin-started-at": String(Date.now() - 7) };
+		const result = await call(PICK, { method: "POST", headers, body: {} });
+		assert.equal(result.status, 200);
+		assert.deepEqual(Object.keys(result.body).sort(), ["directory", "initialFolder", "path"], "响应体形状不变");
+		assert.match(readLog(), /timing=wait=\d+ms show=\d+ms total=\d+ms/);
+	});
+
+	test("请求在宿主里排久了，单独记一条 pick-delayed", windowsOnly, async () => {
+		spawnImpl = () => {
+			const child = fakeChild();
+			setImmediate(() => child.emit("message", { kind: "done", path: null }));
+			return child;
+		};
+		const headers = { ...SAME_ORIGIN_JSON, "x-dsh-directory-plugin-started-at": String(Date.now() - 4000) };
+		await call(PICK, { method: "POST", headers, body: {} });
+		assert.match(readLog(), /pick-delayed wait=\d+ms purpose=workspace/);
+	});
+});

@@ -188,12 +188,17 @@ describe("runPick：和 worker 之间的 IPC", () => {
 
 	test("showing 之后 worker 让出了事件循环，选择结果依然送达，并带上起始目录诊断", async () => {
 		process.env.FAKE_WORKER_MODE = "yield";
-		assert.deepEqual(await runPick("D:\\Configured", fake), {
+		const { timing, ...result } = await runPick("D:\\Configured", fake);
+		assert.deepEqual(result, {
 			path: "D:\\Picked",
 			initialFolder: { requested: "D:\\Configured", applied: true },
 			owner: null,
 			koffi: "fake-koffi"
 		});
+		// 耗时只写日志（宿主拼成 timing= 一行），不进响应体。
+		assert.equal(typeof timing.toShowingMs, "number");
+		assert.equal(typeof timing.toDoneMs, "number");
+		assert.ok(timing.toDoneMs >= timing.toShowingMs, "关掉框的时间不该早于框出现");
 	});
 
 	test("worker 中途退出时报错（pick-exited，detail 是退出码），错误上带着已回报的诊断", async () => {

@@ -130,11 +130,13 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。worker 只
 
 | 日志 | 含义 |
 | --- | --- |
-| `host-routes-registered /dsh-directory-plugin` | 宿主侧已加载、HTTP 路由就绪 |
-| `pick D:\Projects\demo purpose=workspace owner=… koffi=… initial={"applied":true,...}` | 选择框确实以配置目录为起点（`purpose=settings` 是设置页的「浏览…」）；`owner` 是 DSH 窗口句柄，`none` 表示当时前台不是 DSH、选择框没有父窗口；`koffi` 是 worker 实际加载的 koffi（`vendor` 里那份，或者回退到的 DSH 自带那份） |
+| `host-routes-registered /dsh-directory-plugin routes=2` | 宿主侧已加载、HTTP 路由就绪；`routes=0` 表示两条路由都被别的副本占了（见下面的 `duplicate-mount`） |
+| `duplicate-mount <路径> <说明>` | 同一个进程里挂了两份：profile 装了一份，市场又热挂了一份。宿主只注册一份路由、功能不受影响，但浏览器侧会因为「同一个包解析到两个 Loader 源」而加载失败。删掉其中一份即可（市场里关掉插件，或删掉 `%USERPROFILE%\.dsh\profiles\desktop\.dsh-market\hot-1.yml`） |
+| `pick D:\Projects\demo purpose=workspace owner=… koffi=… initial={"applied":true,...}` | 选择框确实以配置目录为起点（`purpose=settings` 是设置页的「浏览…」）；`owner` 是 DSH 窗口句柄，`none` 表示当时前台不是 DSH、选择框没有父窗口；`koffi` 是 worker 实际加载的 koffi（`vendor` 里那份，或者回退到的 DSH 自带那份）；行尾的 `timing=` 是各段耗时：`wait=` 请求从浏览器发出到宿主开始处理（宿主事件循环被别的东西占住时这段会变大），`show=` 拉起 worker 到框出现，`total=` 到用户关掉框 |
 | `owner-reenable <句柄>` | 选择框进程在对话框开着时意外退出，已经把被它禁用的 DSH 窗口恢复 |
 | `pick (cancelled) ...` | 用户取消了 |
 | `pick-failed <错误码> <说明> ...` | 对话框进程出错（worker 的堆栈也在这一行），界面会回退到系统默认行为 |
+| `pick-delayed wait=<毫秒> purpose=…` | 请求在宿主里排了超过 500ms 才被处理，单独记一条，便于定位宿主卡顿 |
 | `route-failed <路径> <说明>` | 路由处理器里出了没料到的异常，已回 500；请附上这一行提 issue |
 | `config-corrupt <文件> <原因>` | 配置文件不是合法 JSON（多半是反斜杠没写成 `\\`），已按未设置处理，文件原样保留 |
 | `config-write-failed ...` | 保存配置失败（多为文件被其他程序占用），设置页会显示错误，稍后重试即可 |

@@ -14,6 +14,8 @@ window.__ModuleLoader__.load({
 		const BASE = "/dsh-directory-plugin";
 		const HOLES = ["conversation.hero.workspace.directoryFlow", "sidebar.workspaces.directoryFlow"];
 		const BRIDGE_GLOBAL = "__DSH_DIRECTORY_PICKER__";
+		/** 请求头：客户端发出 /pick 的时刻（毫秒）。宿主用它算出这次请求排了多久。 */
+		const STARTED_AT_HEADER = "x-dsh-directory-plugin-started-at";
 
 		const zh = {
 			nav: "新建工作区目录",
@@ -158,11 +160,16 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * 用宿主路由打开原生选择框。
+		 * 请求头带上发出时刻：宿主据此算出这次请求在网络上 / 宿主事件循环里排了多久（写进 timing 日志）。
 		 * @param {{purpose: string, title?: string, initialDirectory?: string}} request - purpose：
 		 *   "workspace" 或 "settings"；title 不给就用系统自带的；initialDirectory 不给就从已保存的目录开始。
 		 */
 		function pickViaHost(request) {
-			return requestJson("/pick", { method: "POST", body: JSON.stringify(request) });
+			return requestJson("/pick", {
+				method: "POST",
+				headers: { "content-type": "application/json", [STARTED_AT_HEADER]: String(Date.now()) },
+				body: JSON.stringify(request)
+			});
 		}
 
 		/** 回退：桌面端预加载的 __DSH_DIRECTORY_PICKER__（系统默认位置）。 */
@@ -195,6 +202,47 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
+			 * 拿到一次选择结果：先走宿主对话框，失败再回退内置 bridge。
+			 * busy（另一个用途的选择框正开着）原样抛出：这时回退会再弹出第二个框。
+			 * 回退也失败时报宿主那个错误——它带着 code，界面能翻译成文案。
+			 * @param {{purpose: string, title?: string}} request - 交给宿主 /pick 的请求。
+			 * @returns {Promise<string | null>} 选中的路径；取消时 null。
+			 */
+			async function requestPick(request) {
+				try {
+					const data = await pickViaHost(request);
+					return typeof data?.path === "string" && data.path !== "" ? data.path : null;
+				} catch (error) {
+					if (error?.code === "busy") throw error;
+					try {
+						return await pickViaBridge();
+					} catch {
+						throw error;
+					}
+				}
+			}
+
+			/**
+			 * 正在进行的选目录请求。原生框是模态的，第二个框会让 DSH 主窗口一起禁用，
+			 * 用户看到的就是「点了没反应」；所以同一时刻只允许一个，后到的直接搭它的结果。
+			 */
+			let inflight = null;
+
+			/**
+			 * 同一个时刻只发起一次 pick：槽位重挂载会让同一个 open 请求再跑一遍。
+			 * @param {() => Promise<string | null>} run - 真正的请求。
+			 * @returns {Promise<string | null>} 选择结果。
+			 */
+			function pickOnce(run) {
+				if (inflight !== null) return inflight;
+				const promise = run().finally(() => {
+					if (inflight === promise) inflight = null;
+				});
+				inflight = promise;
+				return promise;
+			}
+
+			/**
 			 * 接管 directoryFlow：open 时先走宿主对话框，失败再回退内置 bridge。
 			 * 组件本身不渲染任何东西（与桌面端内置实现一致）。
 			 */
@@ -205,53 +253,43 @@ window.__ModuleLoader__.load({
 				react.useEffect(() => {
 					latest.current = props;
 				});
+				// 一个 open 只处理一次：重渲染、回调整形、槽位被重新注入，都不该再弹第二个框。
+				const armed = react.useRef(false);
+				// 卸载之后不再交付结果：对话框没有中止手段，迟到的答案不该落到已经不存在的占用者上。
+				const alive = react.useRef(true);
 				react.useEffect(() => {
-					if (!open) return undefined;
-					let alive = true;
-					const picked = (path) => {
-						if (!alive) return;
+					alive.current = true;
+					return () => {
+						alive.current = false;
+					};
+				}, []);
+				react.useEffect(() => {
+					if (!open) {
+						armed.current = false;
+						return undefined;
+					}
+					if (armed.current) return undefined;
+					armed.current = true;
+					const settle = (path) => {
+						if (!alive.current) return;
 						const current = latest.current || {};
 						if (typeof path === "string" && path !== "") {
 							if (typeof current.onPicked === "function") current.onPicked(path);
 						} else if (typeof current.onCancel === "function") current.onCancel();
 					};
 					const report = (message) => {
-						if (!alive) return;
+						if (!alive.current) return;
 						const current = latest.current || {};
 						if (typeof current.onError === "function") current.onError(message);
 						else console.warn("[dsh-directory-plugin] " + message);
 					};
-					const run = async () => {
-						let data;
-						try {
-							data = await pickViaHost({ purpose: "workspace", title: dialogTitle("dialogTitleWorkspace") });
-						} catch (error) {
-							if (!alive) return;
-							// 设置页的选择框正开着：直接告诉用户，不再弹出第二个（DSH 自带的）框。
-							if (error?.code === "busy") {
-								report(describe(error));
-								return;
-							}
-							let path;
-							try {
-								path = await pickViaBridge();
-							} catch {
-								report(describe(error));
-								return;
-							}
-							picked(path);
-							return;
-						}
-						if (alive) picked(data?.path);
-					};
-					run().catch((error) => console.warn("[dsh-directory-plugin] directory flow failed", error));
-					return () => {
-						alive = false;
-					};
+					pickOnce(() => requestPick({ purpose: "workspace", title: dialogTitle("dialogTitleWorkspace") }))
+						.then(settle, (error) => report(describe(error)))
+						.catch((error) => console.warn("[dsh-directory-plugin] directory flow failed", error));
+					return undefined;
 				}, [open]);
 				return null;
 			}
-
 			/** 设置页入口。 */
 			function SettingsPage() {
 				const [state, setState] = react.useState({ value: "", saved: null, status: "", tone: "muted", busy: false, supported: true });
