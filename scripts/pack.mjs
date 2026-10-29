@@ -51,8 +51,15 @@ function dosDateTime(date) {
 }
 
 /**
+ * 可复构建的固定时间戳：与 git archive 一样，全部条目都用 1980-01-01 00:00。
+ * zip 头里不带本地/CI 的文件 mtime，同一份源码在任何机器上打出的字节完全一致，
+ * release 附件的 sha256 才能和本地对得上。
+ */
+const REPRODUCIBLE_EPOCH = new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
+
+/**
  * 写一个 deflate 压缩的 zip。
- * @param {Array<{name: string, data: Buffer, mtime: Date}>} entries - 条目（按名称排序后写入）。
+ * @param {Array<{name: string, data: Buffer}>} entries - 条目（按名称排序后写入；时间戳固定，见 REPRODUCIBLE_EPOCH）。
  * @returns {Buffer} 完整 zip 字节。
  */
 function buildZip(entries) {
@@ -64,7 +71,7 @@ function buildZip(entries) {
 		const raw = entry.data;
 		const packed = zlib.deflateRawSync(raw, { level: 9 });
 		const crc = crc32(raw);
-		const { time, date } = dosDateTime(entry.mtime);
+		const { time, date } = dosDateTime(REPRODUCIBLE_EPOCH);
 
 		const local = Buffer.alloc(30);
 		local.writeUInt32LE(0x04034b50, 0);
@@ -201,7 +208,7 @@ for (const entry of wanted) {
 
 const entries = [...seen.entries()]
 	.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-	.map(([name, file]) => ({ name, data: fs.readFileSync(file), mtime: fs.statSync(file).mtime }));
+	.map(([name, file]) => ({ name, data: fs.readFileSync(file) }));
 
 const zip = buildZip(entries);
 const names = readCentralDirectory(zip);
