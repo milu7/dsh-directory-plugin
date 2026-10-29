@@ -1,6 +1,9 @@
 # 仓库根目录的 node_modules（vendor/ 里的依赖是随包携带的，必须提交）
 /node_modules/
 
+# 本地打包产物（CI 在 tag 时重新生成）
+/dist/
+
 # 日志与临时文件
 *.log
 *.tmp

@@ -41,3 +41,35 @@ test("README 的示意图不超过 1760 宽（页面按 880 宽显示，两倍�
 		assert.ok(readme.includes("docs/images/" + name), "README 没有用到 " + name);
 	}
 });
+
+test("manifest 的入口、白名单与引擎范围齐全（打包与 CI 都依赖这些字段）", () => {
+	const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+	assert.match(manifest.version, /^\d+\.\d+\.\d+$/, "version 不是语义化版本");
+	assert.equal(manifest.main, "lib/index.js");
+	assert.equal(manifest.exports["."], "./lib/index.js");
+	assert.equal(manifest.exports["./client"], "./client/client.js");
+	for (const entry of ["lib", "client", "vendor", "cordis.patch.yml", "README.md", "LICENSE"]) {
+		assert.ok(manifest.files.includes(entry), "files 里缺少 " + entry);
+	}
+	for (const entry of manifest.files.filter((name) => name !== "README.md" && name !== "LICENSE" && !name.endsWith(".yml"))) {
+		assert.ok(fs.existsSync(path.join(ROOT, entry)), "files 里的 " + entry + " 不存在");
+	}
+	assert.ok(manifest.engines?.node, "缺少 engines.node");
+	assert.ok(manifest.scripts?.pack, "缺少 npm run pack");
+	assert.ok(fs.existsSync(path.join(ROOT, "scripts", "pack.mjs")), "打包脚本不存在");
+});
+
+test("CHANGELOG 的第一条就是当前版本", () => {
+	const changelog = fs.readFileSync(path.join(ROOT, "CHANGELOG.md"), "utf8");
+	const { version } = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
+	const first = /^##\s*\[?(\d+\.\d+\.\d+)\]?/m.exec(changelog);
+	assert.ok(first, "CHANGELOG 里没有版本条目");
+	assert.equal(first[1], version);
+});
+
+test("CI 在 Windows 上跑测试，并在打 tag 时打包发布", () => {
+	const workflow = fs.readFileSync(path.join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
+	assert.match(workflow, /windows-latest/);
+	assert.match(workflow, /npm test/);
+	assert.match(workflow, /scripts\/pack\.mjs/);
+});

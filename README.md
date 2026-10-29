@@ -30,8 +30,8 @@ DSH 桌面端新建工作区时会直接弹出系统文件夹选择框，起点�
 - **接管目录选择流程**：替换「新建工作区」弹出的文件夹对话框，从一个可配置的目录开始。
 - **设置页**：DSH 设置里新增「新建工作区目录」，可输入路径、点「浏览…」选择、保存或一键
   恢复系统默认。
-- **安全回退**：插件不可用、目录被删除或对话框出错时，自动退回 DSH 内置行为，不会报错、
-  不会挡住新建工作区。
+- **安全回退**：插件不可用、目录被删除或对话框出错时，自动退回 DSH 内置行为，不会挡住新建工作区。
+- **本机限制**：非 Windows 或非本机访问时不接管原生选择框，继续使用 DSH 自带的目录选择方式。
 - **诊断日志**：每次弹框都会记录起始目录是否生效，方便排查。
 
 ## 安装
@@ -79,7 +79,7 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 
 <p align="center"><sub>设置 →「新建工作区目录」：输入框、浏览…、保存、恢复系统默认（示意图）</sub></p>
 
-配置示例（`%USERPROFILE%\.dsh\workspace-directory.json`）：
+配置示例（`%DSH_HOME%\workspace-directory.json`，`DSH_HOME` 未设置时为 `%USERPROFILE%\.dsh`）：
 
 ```json
 { "directory": "D:\\Projects" }
@@ -89,7 +89,7 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 自动迁移，无需手动处理；迁移完成后旧文件改名为 `*.migrated` 保留。
 
 手动编辑时注意 JSON 里的反斜杠要写成 `\\`。文件写坏时插件按「未设置」处理并在日志里记一条
-`config-corrupt`，不会覆盖你的文件；改好或在设置页重新保存即可。
+`config-corrupt`，不会覆盖你的文件；改好或在设置页重新保存即可。设置的目录后来被删除时，设置页会提示它已不存在，选择框会回退到系统默认位置。
 
 ## 工作原理
 
@@ -102,13 +102,11 @@ $env:DSH_HOME = "$env:USERPROFILE\.dsh"
 | 核心 | `lib/core.js` | 配置读写、目录校验、拉起对话框子进程 |
 | Worker | `lib/dialog-worker.cjs` | 一次性 Node 子进程，用 koffi 直接调 Win32 COM |
 
-弹框链路：客户端槽位 `open` → `POST /pick` → `core.pickDirectory()` 拉起 worker →
-`CoCreateInstance(FileOpenDialog)` → `SHCreateItemFromParsingName` 造 `IShellItem` →
-`IFileDialog::SetFolder`（vtable 第 12 槽）→ `Show()`。失败时客户端回退到桌面端内置的
-`__DSH_DIRECTORY_PICKER__`。
+接管前客户端先请求 `GET /config`，检查宿主是否支持原生选择框、请求是否来自本机；检查失败或不满足时不注册接管槽位。弹框链路：客户端槽位 `open` → `POST /pick` → `core.pickDirectory()` 异步探测起始目录（最多 1.5 秒）并拉起 worker → `CoCreateInstance(FileOpenDialog)` → `SHCreateItemFromParsingName` 造 `IShellItem` → `IFileDialog::SetFolder`（vtable 第 12 槽）→ `Show()`。失败时客户端回退到桌面端内置的 `__DSH_DIRECTORY_PICKER__`。
 
-两个路由只服务 DSH 自己的页面：浏览器标为跨站的请求返回 403，POST 必须是
-`application/json`（否则 415），`/pick` 只接受 POST——避免任意网页跨站调用它们。
+两个路由只服务 DSH 自己的页面：浏览器标为跨站的请求返回 403，POST 必须是 `application/json`（否则 415），`/pick` 只接受 POST 且只接受本机回环地址（非本机返回 403 `not-local`）。
+
+worker 用 `DSH_DIALOG_INITIAL_STATE` 接收宿主探测结果，只作诊断，不再同步检查目录是否存在。`GET /config` 还返回 `local` 和 `exists`，供客户端决定是否接管及提示目录不存在。
 
 出错时路由返回非 2xx 和 `{ code, error, detail }`：设置页按错误码显示当前界面语言的文案，
 `error` 是给日志看的英文说明，堆栈只写进日志。对话框标题也由客户端按界面语言传过来。
@@ -123,19 +121,26 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。worker 只
 不了时（比如 ARM64 机器），会依次尝试 DSH 安装目录里自带的 koffi，主版本不是 3 的一律跳过；
 都不行就报错，界面回退到 DSH 自带的选择框。
 
+发布包通过 `npm run pack` 从 `package.json` 的 `files` 白名单生成，写入 `dist/`；CI 在 Windows 的 Node 22/24 上运行测试，打 `v*` tag 时自动构建并上传发布包。
+
 ## 排错
 
-诊断日志：`%USERPROFILE%\.dsh\workspace-directory.log`（一个事件一行；超过 1MB 时旧日志改名为
-`workspace-directory.log.1`，只保留这一份）
+诊断日志：`%DSH_HOME%\workspace-directory.log`（`DSH_HOME` 未设置时为 `%USERPROFILE%\.dsh`；一个事件一行；超过 1MB 时旧日志改名为 `workspace-directory.log.1`，只保留这一份）。默认会脱敏绝对路径；排错需要完整路径时，给宿主进程设置 `DSH_DIRECTORY_LOG_PATHS=1`。
 
 | 日志 | 含义 |
 | --- | --- |
 | `host-routes-registered /dsh-directory-plugin routes=2` | 宿主侧已加载、HTTP 路由就绪；`routes=0` 表示两条路由都被别的副本占了（见下面的 `duplicate-mount`） |
 | `duplicate-mount <路径> <说明>` | 同一个进程里挂了两份：profile 装了一份，市场又热挂了一份。宿主只注册一份路由、功能不受影响，但浏览器侧会因为「同一个包解析到两个 Loader 源」而加载失败。删掉其中一份即可（市场里关掉插件，或删掉 `%USERPROFILE%\.dsh\profiles\desktop\.dsh-market\hot-1.yml`） |
 | `pick D:\Projects\demo purpose=workspace owner=… koffi=… initial={"applied":true,...}` | 选择框确实以配置目录为起点（`purpose=settings` 是设置页的「浏览…」）；`owner` 是 DSH 窗口句柄，`none` 表示当时前台不是 DSH、选择框没有父窗口；`koffi` 是 worker 实际加载的 koffi（`vendor` 里那份，或者回退到的 DSH 自带那份）；行尾的 `timing=` 是各段耗时：`wait=` 请求从浏览器发出到宿主开始处理（宿主事件循环被别的东西占住时这段会变大），`show=` 拉起 worker 到框出现，`total=` 到用户关掉框 |
-| `owner-reenable <句柄>` | 选择框进程在对话框开着时意外退出，已经把被它禁用的 DSH 窗口恢复 |
+| `owner-reenable <句柄>` | 选择框进程在对话框开着时意外退出、报错或超时，已尝试恢复被它禁用的 DSH 窗口 |
+| `owner-reenable-failed <说明>` | 修复进程启动失败或异常退出；若窗口仍点不动，请重启 DSH 并附上这一行提 issue |
+| `not-local pick refused from <地址>` | 非本机请求 `/pick` 已返回 403，避免在宿主机屏幕上弹出远程用户看不到的对话框 |
+| `pick-aborted purpose=<用途>` | 插件卸载或宿主关停时中止了仍在进行的对话框请求 |
 | `pick (cancelled) ...` | 用户取消了 |
 | `pick-failed <错误码> <说明> ...` | 对话框进程出错（worker 的堆栈也在这一行），界面会回退到系统默认行为 |
+| `config-unreadable <文件> <原因>` | 配置文件存在但读取失败，按未设置处理，不会覆盖文件 |
+| `config-migrated <目录或 cleared>` | 旧版配置已迁移到当前配置文件 |
+| `config-migrate-failed <说明>` | 旧版配置迁移失败，本次读取仍使用旧值，下次再试 |
 | `pick-delayed wait=<毫秒> purpose=…` | 请求在宿主里排了超过 500ms 才被处理，单独记一条，便于定位宿主卡顿 |
 | `route-failed <路径> <说明>` | 路由处理器里出了没料到的异常，已回 500；请附上这一行提 issue |
 | `config-corrupt <文件> <原因>` | 配置文件不是合法 JSON（多半是反斜杠没写成 `\\`），已按未设置处理，文件原样保留 |
@@ -154,6 +159,8 @@ koffi 3.1.1 已随仓库放在 `vendor/`，安装时不需要联网。worker 只
   里自带的 koffi，这条路径没有在 ARM64 机器上实测过。
 - 其他系统上插件能装上但不生效：设置页只显示一行说明，「新建工作区」继续用 DSH 自带的
   选择框，也不会去起注定失败的对话框进程。
+- 从局域网其他机器打开 Web GUI 时不接管原生选择框，避免对话框弹在宿主机屏幕上；
+  本机桌面端和本机回环访问不受影响。
 - 依赖 DSH 桌面端（Next 内核）的槽位与客户端插件加载机制；如果未来版本移除或重命名这些
   槽位，插件会静默回退，不影响 DSH 本身。
 - 插件不会改动 DSH 安装目录里的任何文件。
@@ -177,7 +184,10 @@ lib/index.js            宿主插件：HTTP 路由
 lib/core.js             配置读写 + 拉起对话框子进程
 lib/dialog-worker.cjs   Win32 文件夹对话框 worker（支持起始目录）
 client/client.js        浏览器 bundle：接管目录流程 + 设置页
+scripts/pack.mjs        按 package.json 的 files 白名单生成发布 zip
 test/                   node:test 用例（npm test，需要 Node 22+；不会弹出真实对话框）
+CHANGELOG.md            版本变更记录
+.github/workflows/ci.yml Windows + Node 22/24 测试，tag 构建并上传发布包
 vendor/                 随包携带的 koffi 3.1.1（只留运行时会加载的 8 个文件，约 1MB）
 docs/images/            README 示意图（overview / settings / how-it-works）
 LICENSE                 MIT

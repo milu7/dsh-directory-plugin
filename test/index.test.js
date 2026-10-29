@@ -7,11 +7,13 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { apply } from "../lib/index.js";
 import { onPlatform } from "./helpers.js";
 
 const CONFIG = "/dsh-directory-plugin/config";
 const PICK = "/dsh-directory-plugin/pick";
+const PLUGIN_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SAME_ORIGIN_JSON = { "content-type": "application/json", "sec-fetch-site": "same-origin" };
 const windowsOnly = { skip: process.platform !== "win32" && "对话框只在 Windows 上拉起" };
 
@@ -47,6 +49,8 @@ function fakeChild() {
 	const child = new EventEmitter();
 	child.kill = () => {};
 	child.disconnect = () => {};
+	// 修复进程会 unref（不阻塞宿主退出），假子进程也得有。
+	child.unref = () => {};
 	return child;
 }
 
@@ -59,6 +63,8 @@ async function waitFor(predicate, what) {
 	assert.fail("等不到：" + what);
 }
 afterEach(() => {
+	delete process.env.DSH_DIRECTORY_LOG_PATHS;
+	delete process.env.DSH_DIRECTORY_PLUGIN_SECRET;
 	fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });
 });
 
@@ -67,39 +73,58 @@ const readLog = () => {
 	return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
 };
 
-/** 通过 apply() 拿到真正注册的路由处理器。 */
-function routes() {
+/** 通过 apply() 挂载一次，拿到路由处理器和卸载函数（effect 返回的 disposer）。 */
+function mount() {
 	const handlers = {};
+	let teardown = null;
 	apply({
 		inject(_dependencies, callback) {
 			callback({
 				webServer: { register: (route) => ((handlers[route.path] = route.handler), () => {}) },
-				effect: (setup) => setup()
+				effect: (setup) => ((teardown = setup()), () => teardown?.())
 			});
 		}
 	});
-	return handlers;
+	return { handlers, dispose: () => teardown?.() };
 }
 
-/** 模拟一次请求，返回 { status, body }。 */
-async function call(route, { method = "GET", headers = {}, body } = {}) {
+/** 通过 apply() 拿到真正注册的路由处理器。 */
+function routes() {
+	return mount().handlers;
+}
+
+/**
+ * 模拟一次请求，返回 { status, headers, body }。
+ * @param {Record<string, Function>} handlers - 路由表。
+ * @param {string} route - 路由路径。
+ * @param {{method?: string, headers?: Record<string, string> | null, body?: unknown, address?: string}} [options] - 请求参数；
+ *   address 填 request.socket.remoteAddress（不填就是「拿不到来源地址」）。
+ */
+async function callOn(handlers, route, { method = "GET", headers = {}, body, address } = {}) {
 	const payload = body === undefined ? [] : [Buffer.from(typeof body === "string" ? body : JSON.stringify(body))];
 	const request = Readable.from(payload);
 	request.method = method;
 	request.headers = headers;
-	const result = { status: null, body: null };
+	if (address !== undefined) request.socket = { remoteAddress: address };
+	const result = { status: null, headers: null, body: null };
 	const response = {
 		writableEnded: false,
-		writeHead(status) {
+		writeHead(status, responseHeaders) {
 			result.status = status;
+			result.headers = responseHeaders;
 		},
 		end(text) {
 			this.writableEnded = true;
 			result.body = JSON.parse(text);
 		}
 	};
-	await routes()[route](request, response);
+	await handlers[route](request, response);
 	return result;
+}
+
+/** 模拟一次请求（每次重新挂载）。 */
+async function call(route, options) {
+	return callOn(routes(), route, options);
 }
 
 describe("CSRF 防护", () => {
@@ -217,8 +242,8 @@ describe("POST /pick", () => {
 			assert.equal(result.body.path, "D:\\Picked");
 			assert.deepEqual(result.body.initialFolder, { requested: null, applied: false });
 		}
-		// 实测时靠这一行确认：对话框以 DSH 窗口为父窗口，用的是哪一份 koffi。
-		assert.ok(readLog().includes("pick D:\\Picked purpose=workspace owner=4242 koffi=C:\\vendor\\koffi\\index.cjs initial="), readLog());
+		// 实测时靠这一行确认：对话框以 DSH 窗口为父窗口，用的是哪一份 koffi（只记来源枚举）。
+		assert.ok(readLog().includes("pick D:\\…\\Picked purpose=workspace owner=4242 koffi=override initial="), readLog());
 	});
 
 	test("输入框里的目录写法不对：400，不起进程", async () => {
@@ -319,5 +344,208 @@ describe("耗时日志", () => {
 		const headers = { ...SAME_ORIGIN_JSON, "x-dsh-directory-plugin-started-at": String(Date.now() - 4000) };
 		await call(PICK, { method: "POST", headers, body: {} });
 		assert.match(readLog(), /pick-delayed wait=\d+ms purpose=workspace/);
+	});
+});
+
+describe("GET /config：local 与 exists", () => {
+	test("响应形状是 directory / configFile / supported / local / exists，并且带 nosniff", async () => {
+		const read = await call(CONFIG, { method: "GET", headers: { "sec-fetch-site": "same-origin" } });
+		assert.equal(read.status, 200);
+		assert.deepEqual(Object.keys(read.body).sort(), ["configFile", "directory", "exists", "local", "supported"]);
+		assert.equal(read.body.local, true);
+		assert.equal(read.body.exists, null, "还没配置时是 null");
+		assert.equal(read.headers["x-content-type-options"], "nosniff");
+	});
+
+	test("已保存的目录存在是 true，被删掉之后是 false", async () => {
+		const saved = path.join(home, "workspace");
+		fs.mkdirSync(saved);
+		await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: { directory: saved } });
+		assert.equal((await call(CONFIG, { method: "GET", headers: SAME_ORIGIN_JSON })).body.exists, true);
+		fs.rmdirSync(saved);
+		assert.equal((await call(CONFIG, { method: "GET", headers: SAME_ORIGIN_JSON })).body.exists, false);
+	});
+
+	test("非本机请求：/config 照常返回，local 为 false（客户端据此不接管选择框）", async () => {
+		const read = await call(CONFIG, { method: "GET", headers: SAME_ORIGIN_JSON, address: "10.1.2.3" });
+		assert.equal(read.status, 200);
+		assert.equal(read.body.local, false);
+		assert.equal((await call(CONFIG, { method: "GET", headers: SAME_ORIGIN_JSON })).body.local, true);
+	});
+
+	test("回环地址的三种写法都算本机", async () => {
+		for (const address of ["127.0.0.1", "::1", "::FFFF:127.0.0.1"]) {
+			assert.equal((await call(CONFIG, { method: "GET", headers: SAME_ORIGIN_JSON, address })).body.local, true, address);
+		}
+	});
+
+	test("配置文件读不出来：directory 和 exists 都是 null，不抛", async (t) => {
+		fs.writeFileSync(path.join(home, "workspace-directory.json"), "{}");
+		t.mock.method(fs.promises, "readFile", async () => {
+			throw Object.assign(new Error("EBUSY: resource busy or locked, open"), { code: "EBUSY" });
+		});
+		const read = await call(CONFIG, { method: "GET", headers: SAME_ORIGIN_JSON });
+		assert.equal(read.status, 200);
+		assert.equal(read.body.directory, null);
+		assert.equal(read.body.exists, null);
+		assert.match(readLog(), /config-unreadable/);
+	});
+});
+
+describe("POST /config：清除配置与请求体上限", () => {
+	test("空串 / null / 不传 directory 都是清除：回 200，文件里是 null", async () => {
+		await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: { directory: home } });
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "workspace-directory.json"), "utf8")), { directory: home });
+
+		for (const body of [{ directory: "" }, { directory: null }, {}]) {
+			const cleared = await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body });
+			assert.equal(cleared.status, 200);
+			assert.equal(cleared.body.directory, null);
+			assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "workspace-directory.json"), "utf8")), { directory: null });
+			assert.equal((await call(CONFIG, { method: "GET", headers: SAME_ORIGIN_JSON })).body.directory, null);
+		}
+	});
+
+	test("请求体超过 64KB：413 body-too-large，不写配置", async () => {
+		const result = await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: "x".repeat(70000) });
+		assert.equal(result.status, 413);
+		assert.equal(result.body.code, "body-too-large");
+		assert.ok(!fs.existsSync(path.join(home, "workspace-directory.json")));
+	});
+
+	test("/pick 的请求体同样有上限", async () => {
+		const result = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: "x".repeat(70000) });
+		assert.equal(result.status, 413);
+		assert.equal(result.body.code, "body-too-large");
+		assert.equal(spawnCalls.length, 0);
+	});
+});
+
+describe("POST /pick：只接受本机请求", () => {
+	test("非回环地址：403 not-local，不起进程，日志留痕", windowsOnly, async () => {
+		const result = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {}, address: "192.168.1.20" });
+		assert.equal(result.status, 403);
+		assert.equal(result.body.code, "not-local");
+		assert.equal(spawnCalls.length, 0);
+		assert.match(readLog(), /not-local pick refused from 192\.168\.1\.20/);
+	});
+
+	test("回环地址的三种写法都放行", windowsOnly, async () => {
+		for (const address of ["127.0.0.1", "::1", "::FFFF:127.0.0.1"]) {
+			await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {}, address });
+		}
+		assert.equal(spawnCalls.length, 3);
+		assert.doesNotMatch(readLog(), /not-local/);
+	});
+});
+
+describe("POST /pick：交给 worker 的东西", () => {
+	test("worker 只拿到白名单环境变量，外加 DSH_* 自定义项", windowsOnly, async () => {
+		process.env.DSH_DIRECTORY_PLUGIN_SECRET = "不该传给 worker";
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
+		const env = spawnCalls[0].options.env;
+		assert.equal(env.ELECTRON_RUN_AS_NODE, "1");
+		assert.equal(env.PATH, process.env.PATH);
+		assert.equal("DSH_DIRECTORY_PLUGIN_SECRET" in env, false, "白名单之外的变量不传");
+		assert.equal("DSH_HOME" in env, false, "宿主自己的环境变量不外传");
+		assert.ok(env.DSH_KOFFI_PATH.endsWith(path.join("vendor", "node_modules", "koffi", "index.cjs")), env.DSH_KOFFI_PATH);
+		assert.equal(env.DSH_DIALOG_INITIAL_STATE, "none");
+		assert.equal(env.DSH_DIALOG_INITIAL_DIR, "");
+	});
+
+	test("DSH_DIALOG_INITIAL_STATE 跟着已保存的目录走：dir / missing", windowsOnly, async () => {
+		const saved = path.join(home, "workspace");
+		fs.mkdirSync(saved);
+		await call(CONFIG, { method: "POST", headers: SAME_ORIGIN_JSON, body: { directory: saved } });
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_INITIAL_STATE, "dir");
+
+		spawnCalls.length = 0;
+		fs.rmdirSync(saved);
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_INITIAL_STATE, "missing");
+	});
+
+	test("输入框里填的是个文件：state 是 not-dir（worker 据此回退并报告）", windowsOnly, async () => {
+		const file = path.join(home, "file.txt");
+		fs.writeFileSync(file, "");
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: { purpose: "settings", initialDirectory: file } });
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_INITIAL_STATE, "not-dir");
+		assert.equal(spawnCalls[0].options.env.DSH_DIALOG_INITIAL_DIR, file);
+	});
+});
+
+describe("日志脱敏", () => {
+	const PICKED = "D:\\DSH Project\\双人求生\\子目录";
+	const REQUESTED = "D:\\DSH Project\\双人求生";
+
+	/** 让假 worker 回报一次带完整路径的 showing 和 done。 */
+	function replyWithPaths() {
+		spawnImpl = () => {
+			const child = fakeChild();
+			setImmediate(() => {
+				child.emit("message", {
+					kind: "showing",
+					initialFolder: { requested: REQUESTED, state: "dir", applied: true, resolvedPath: REQUESTED },
+					owner: "4242",
+					koffi: path.join(PLUGIN_ROOT, "vendor", "node_modules", "koffi", "index.cjs")
+				});
+				child.emit("message", { kind: "done", path: PICKED });
+			});
+			return child;
+		};
+	}
+
+	test("默认只留最后一段目录名：完整路径不落盘，响应体照旧给完整路径", windowsOnly, async () => {
+		replyWithPaths();
+		const result = await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
+		assert.equal(result.status, 200);
+		assert.equal(result.body.path, PICKED, "界面要的是完整路径");
+
+		const log = readLog();
+		assert.doesNotMatch(log, /DSH Project/, log);
+		assert.ok(log.includes("pick D:\\…\\子目录 purpose=workspace owner=4242 koffi=vendor initial="), log);
+		assert.ok(log.includes("koffi=vendor"), "koffi 只记来源枚举");
+		// initial= 是 JSON.stringify 出来的：反斜杠成对出现，字段本身也必须先脱敏。
+		assert.ok(log.includes('"requested":"D:\\\\…\\\\双人求生"'), log);
+		assert.ok(log.includes('"resolvedPath":"D:\\\\…\\\\双人求生"'), log);
+	});
+
+	test("DSH_DIRECTORY_LOG_PATHS=1 时写完整路径（排错用）", windowsOnly, async () => {
+		process.env.DSH_DIRECTORY_LOG_PATHS = "1";
+		replyWithPaths();
+		await call(PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
+		const log = readLog();
+		assert.ok(log.includes("pick " + PICKED + " purpose=workspace"), log);
+	});
+});
+
+describe("卸载（effect disposer）", () => {
+	test("dispose 时中止还开着的对话框：kill + pick-aborted，请求以 pick-exited 收尾", windowsOnly, async () => {
+		const child = fakeChild();
+		let kills = 0;
+		child.kill = () => {
+			kills++;
+			child.emit("close", null, "SIGTERM");
+		};
+		spawnImpl = () => child;
+		const mounted = mount();
+		const pending = callOn(mounted.handlers, PICK, { method: "POST", headers: SAME_ORIGIN_JSON, body: {} });
+		await waitFor(() => spawnCalls.length === 1, "对话框进程");
+		child.emit("message", { kind: "showing", initialFolder: null, owner: "4242", koffi: "C:\\koffi\\index.cjs" });
+
+		mounted.dispose();
+
+		assert.equal(kills, 1);
+		assert.match(readLog(), /pick-aborted purpose=workspace/);
+		const result = await pending;
+		assert.equal(result.status, 500);
+		assert.equal(result.body.code, "pick-exited");
+	});
+
+	test("没有对话框时 dispose 什么也不做", () => {
+		const mounted = mount();
+		mounted.dispose();
+		assert.doesNotMatch(readLog(), /pick-aborted/);
 	});
 });

@@ -2,6 +2,8 @@
  * 浏览器侧（client plane）：
  *  1) 接管「新建工作区」的两个 directoryFlow 槽位（priority -2，低于桌面端内置的 -1），
  *     把原生选择框换成「从默认目录开始」的那一个；失败时回退到内置 bridge。
+ *     接管前先 GET /config 预检：宿主不支持原生选择框、这次请求不是本机的、或者根本答不上来时，
+ *     一个槽位都不碰，让 DSH 自带的选择器继续工作。
  *  2) 在设置页注册自己的入口（输入框 / 浏览 / 保存 / 恢复默认）。
  */
 window.__ModuleLoader__.load({
@@ -16,6 +18,10 @@ window.__ModuleLoader__.load({
 		const BRIDGE_GLOBAL = "__DSH_DIRECTORY_PICKER__";
 		/** 请求头：客户端发出 /pick 的时刻（毫秒）。宿主用它算出这次请求排了多久。 */
 		const STARTED_AT_HEADER = "x-dsh-directory-plugin-started-at";
+		/** 预检 GET /config 失败后重试的间隔（毫秒）：宿主刚重启时可能还答不上来。 */
+		const PROBE_RETRY_MS = 800;
+		/** 设置页输入框的长度上限：够放任何路径，又不会撞上宿主 64 KB 的请求体上限。 */
+		const MAX_DIRECTORY_CHARS = 2048;
 
 		const zh = {
 			nav: "新建工作区目录",
@@ -51,7 +57,12 @@ window.__ModuleLoader__.load({
 			errPickExited: "选择框进程意外退出：",
 			errPickFailed: "原生选择框出错：",
 			errBusy: "已经有一个文件夹选择框开着，请先关掉它",
-			errUnsupported: "只支持 Windows"
+			errUnsupported: "只支持 Windows",
+			errBodyTooLarge: "提交的内容超过了宿主允许的大小",
+			errInternal: "插件内部出错了，详情见日志",
+			errNotLocal: "原生选择框只在本机可用（当前页面不是从本机打开的）",
+			missingHint: "当前目录不存在，下次会回退到系统默认位置",
+			remoteHint: "当前页面不是从本机打开的：插件不会接管「新建工作区」，本页的「浏览…」也无法弹出选择框。"
 		};
 		const en = {
 			nav: "Workspace folder",
@@ -86,10 +97,18 @@ window.__ModuleLoader__.load({
 			errPickExited: "The folder chooser process exited unexpectedly: ",
 			errPickFailed: "The native folder chooser failed: ",
 			errBusy: "Another folder chooser is already open. Close it first",
-			errUnsupported: "Only available on Windows"
+			errUnsupported: "Only available on Windows",
+			errBodyTooLarge: "The request is larger than the Host allows",
+			errInternal: "The plugin hit an internal error — see the log",
+			errNotLocal: "The native chooser is only available on this machine (this page is not local)",
+			missingHint: "This folder no longer exists. The next chooser will open at the system default position.",
+			remoteHint: "This page is not opened from this machine: the plugin does not take over New Workspace here, and Browse… cannot open the native chooser."
 		};
 
-		/** 宿主错误码 → 文案 key。没列出来的（跨站、请求格式不对等）只会出在调用方写错时，直接显示英文说明。 */
+		/**
+		 * 宿主错误码 → 文案 key。没列出来的（跨站、请求格式不对等）只会出在调用方写错时，直接显示英文说明。
+		 * body-too-large / internal-error / not-local 宿主不带 detail，词典里的文案本身就是完整的句子。
+		 */
 		const ERROR_KEYS = {
 			"not-a-string": "errNotString",
 			empty: "errEmpty",
@@ -101,7 +120,10 @@ window.__ModuleLoader__.load({
 			"pick-exited": "errPickExited",
 			"pick-failed": "errPickFailed",
 			busy: "errBusy",
-			unsupported: "errUnsupported"
+			unsupported: "errUnsupported",
+			"body-too-large": "errBodyTooLarge",
+			"internal-error": "errInternal",
+			"not-local": "errNotLocal"
 		};
 
 		/* 设置页样式：放在组件外面，每次渲染复用同一批对象。 */
@@ -203,7 +225,7 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * 拿到一次选择结果：先走宿主对话框，失败再回退内置 bridge。
-			 * busy（另一个用途的选择框正开着）原样抛出：这时回退会再弹出第二个框。
+			 * busy（另一个用途的选择框正开着）和 not-local（不是本机请求）原样抛出：这时回退只会再弹出第二个框。
 			 * 回退也失败时报宿主那个错误——它带着 code，界面能翻译成文案。
 			 * @param {{purpose: string, title?: string}} request - 交给宿主 /pick 的请求。
 			 * @returns {Promise<string | null>} 选中的路径；取消时 null。
@@ -213,7 +235,8 @@ window.__ModuleLoader__.load({
 					const data = await pickViaHost(request);
 					return typeof data?.path === "string" && data.path !== "" ? data.path : null;
 				} catch (error) {
-					if (error?.code === "busy") throw error;
+					// busy：另一个用途的框正开着；not-local：这里不是本机，回退只会再弹一个（而且多半没有 bridge）。
+					if (error?.code === "busy" || error?.code === "not-local") throw error;
 					try {
 						return await pickViaBridge();
 					} catch {
@@ -223,76 +246,156 @@ window.__ModuleLoader__.load({
 			}
 
 			/**
-			 * 正在进行的选目录请求。原生框是模态的，第二个框会让 DSH 主窗口一起禁用，
-			 * 用户看到的就是「点了没反应」；所以同一时刻只允许一个，后到的直接搭它的结果。
+			 * 正在进行的选目录请求，按槽位名分桶。原生框是模态的，第二个框会让 DSH 主窗口一起禁用，
+			 * 用户看到的就是「点了没反应」；所以同一个槽位同一时刻只允许一个，后到的直接搭它的结果。
+			 * 两个槽位分开算：它们的占用者不同，搭车会把同一个路径交付两次（可能重复建工作区）。
+			 * @type {Map<string, Promise<string | null>>}
 			 */
-			let inflight = null;
+			const inflight = new Map();
 
 			/**
-			 * 同一个时刻只发起一次 pick：槽位重挂载会让同一个 open 请求再跑一遍。
+			 * 同一个槽位同一时刻只发起一次 pick：槽位重挂载会让同一个 open 请求再跑一遍。
+			 * @param {string} hole - 槽位名（分桶键）。
 			 * @param {() => Promise<string | null>} run - 真正的请求。
 			 * @returns {Promise<string | null>} 选择结果。
 			 */
-			function pickOnce(run) {
-				if (inflight !== null) return inflight;
+			function pickOnce(hole, run) {
+				const pending = inflight.get(hole);
+				if (pending !== undefined) return pending;
 				const promise = run().finally(() => {
-					if (inflight === promise) inflight = null;
+					if (inflight.get(hole) === promise) inflight.delete(hole);
 				});
-				inflight = promise;
+				inflight.set(hole, promise);
 				return promise;
 			}
 
 			/**
-			 * 接管 directoryFlow：open 时先走宿主对话框，失败再回退内置 bridge。
-			 * 组件本身不渲染任何东西（与桌面端内置实现一致）。
+			 * 生成接管某个槽位的组件：open 时先走宿主对话框，失败再回退内置 bridge。
+			 * 组件本身不渲染任何东西（与桌面端内置实现一致）；hole 只用来给 pickOnce 分桶。
+			 * @param {string} hole - 槽位名。
+			 * @returns {(props: {open?: boolean, onPicked?: Function, onCancel?: Function, onError?: Function}) => null} directoryFlow 组件。
 			 */
-			function DirectoryFlow(props) {
-				const open = props?.open;
-				// 下面的 effect 只随 open 重跑；对话框开着时父组件可能换了回调，结果要交给最新的那一份。
-				const latest = react.useRef(props);
-				react.useEffect(() => {
-					latest.current = props;
-				});
-				// 一个 open 只处理一次：重渲染、回调整形、槽位被重新注入，都不该再弹第二个框。
-				const armed = react.useRef(false);
-				// 卸载之后不再交付结果：对话框没有中止手段，迟到的答案不该落到已经不存在的占用者上。
-				const alive = react.useRef(true);
-				react.useEffect(() => {
-					alive.current = true;
-					return () => {
-						alive.current = false;
-					};
-				}, []);
-				react.useEffect(() => {
-					if (!open) {
-						armed.current = false;
+			function createDirectoryFlow(hole) {
+				return function DirectoryFlow(props) {
+					const open = props?.open;
+					// 下面的 effect 只随 open 重跑；对话框开着时父组件可能换了回调，结果要交给最新的那一份。
+					const latest = react.useRef(props);
+					react.useEffect(() => {
+						latest.current = props;
+					});
+					// 一个 open 只处理一次：重渲染、回调整形、槽位被重新注入，都不该再弹第二个框。
+					const armed = react.useRef(false);
+					// 卸载之后不再交付结果：对话框没有中止手段，迟到的答案不该落到已经不存在的占用者上。
+					const alive = react.useRef(true);
+					react.useEffect(() => {
+						alive.current = true;
+						return () => {
+							alive.current = false;
+						};
+					}, []);
+					react.useEffect(() => {
+						if (!open) {
+							armed.current = false;
+							return undefined;
+						}
+						if (armed.current) return undefined;
+						armed.current = true;
+						const settle = (path) => {
+							if (!alive.current) return;
+							const current = latest.current || {};
+							if (typeof path === "string" && path !== "") {
+								if (typeof current.onPicked === "function") current.onPicked(path);
+							} else if (typeof current.onCancel === "function") current.onCancel();
+						};
+						const report = (message) => {
+							if (!alive.current) return;
+							const current = latest.current || {};
+							if (typeof current.onError === "function") current.onError(message);
+							else console.warn("[dsh-directory-plugin] " + message);
+						};
+						pickOnce(hole, () => requestPick({ purpose: "workspace", title: dialogTitle("dialogTitleWorkspace") }))
+							.then(settle, (error) => report(describe(error)))
+							.catch((error) => console.warn("[dsh-directory-plugin] directory flow failed", error));
 						return undefined;
+					}, [open]);
+					return null;
+				};
+			}
+
+			/** 等一会儿：预检失败后的重试间隔。 */
+			function delay(ms) {
+				return new Promise((resolve) => setTimeout(resolve, ms));
+			}
+
+			/**
+			 * 接管前先问宿主：这个宿主能不能弹原生选择框（Windows）、这次请求是不是本机的。
+			 * 失败重试一次——宿主刚重启时 /config 可能还答不上来。
+			 * @returns {Promise<{supported: boolean, local: boolean} | null>} 取不到时 null。
+			 */
+			async function probeHost() {
+				let failure = null;
+				for (let attempt = 0; attempt < 2; attempt++) {
+					if (attempt > 0) await delay(PROBE_RETRY_MS);
+					try {
+						const data = await requestJson("/config", { method: "GET" });
+						return { supported: data?.supported !== false, local: data?.local !== false };
+					} catch (error) {
+						failure = error;
 					}
-					if (armed.current) return undefined;
-					armed.current = true;
-					const settle = (path) => {
-						if (!alive.current) return;
-						const current = latest.current || {};
-						if (typeof path === "string" && path !== "") {
-							if (typeof current.onPicked === "function") current.onPicked(path);
-						} else if (typeof current.onCancel === "function") current.onCancel();
-					};
-					const report = (message) => {
-						if (!alive.current) return;
-						const current = latest.current || {};
-						if (typeof current.onError === "function") current.onError(message);
-						else console.warn("[dsh-directory-plugin] " + message);
-					};
-					pickOnce(() => requestPick({ purpose: "workspace", title: dialogTitle("dialogTitleWorkspace") }))
-						.then(settle, (error) => report(describe(error)))
-						.catch((error) => console.warn("[dsh-directory-plugin] directory flow failed", error));
-					return undefined;
-				}, [open]);
+				}
+				console.warn("[dsh-directory-plugin] /config preflight failed, keeping DSH's built-in folder chooser", failure);
 				return null;
+			}
+
+			/**
+			 * 预检通过后再接管两个 directoryFlow 槽位（priority -2，压过桌面端内置的 -1）。
+			 *
+			 * 预检是异步的，注册只能延后：插件卸载（effect 的 disposer 先跑）之后才回来的结果直接丢弃，
+			 * 不会在卸载后又往槽位里塞东西。返回的 disposer 同时回收已经装上的注册。
+			 * @param {*} ctx - 客户端插件上下文。
+			 * @returns {() => void} 卸载时回收布局的 disposer。
+			 */
+			function installDirectoryFlowTakeover(ctx) {
+				let disposed = false;
+				/** @type {Array<() => void>} */
+				const disposers = [];
+				(async () => {
+					const host = await probeHost();
+					// 卸载后才回来的结果：一个槽位都不注册，内置选择器继续工作。
+					if (disposed) return;
+					if (host === null || !host.supported || !host.local) {
+						console.warn(
+							"[dsh-directory-plugin] keeping DSH's built-in folder chooser: " +
+								(host === null ? "the host did not answer GET /config" : host.supported ? "this request is not local" : "the host does not support the native chooser")
+						);
+						return;
+					}
+					// 两个槽位各自注册：DSH 哪天改名或删掉其中一个，另一个入口照样接管。
+					for (const hole of HOLES) {
+						try {
+							const dispose = ctx.slots.inject(hole, () => ctx.slots.register({ name: hole, priority: -2 }, createDirectoryFlow(hole)));
+							if (typeof dispose === "function") disposers.push(dispose);
+						} catch (error) {
+							console.warn("[dsh-directory-plugin] directory flow takeover failed: " + hole, error);
+						}
+					}
+				})().catch((error) => {
+					console.warn("[dsh-directory-plugin] directory flow takeover failed", error);
+				});
+				return () => {
+					disposed = true;
+					for (const dispose of disposers.splice(0)) {
+						try {
+							dispose?.();
+						} catch (error) {
+							console.warn("[dsh-directory-plugin] directory flow disposal failed", error);
+						}
+					}
+				};
 			}
 			/** 设置页入口。 */
 			function SettingsPage() {
-				const [state, setState] = react.useState({ value: "", saved: null, status: "", tone: "muted", busy: false, supported: true });
+				const [state, setState] = react.useState({ value: "", saved: null, status: "", tone: "muted", busy: false, supported: true, local: true, exists: null });
 				const update = (patch) => setState((prev) => ({ ...prev, ...patch }));
 
 				react.useEffect(() => {
@@ -307,7 +410,16 @@ window.__ModuleLoader__.load({
 						}
 						if (!alive) return;
 						const directory = typeof data.directory === "string" ? data.directory : "";
-						update({ value: directory, saved: directory === "" ? null : directory, status: "", tone: "muted", busy: false, supported: data.supported !== false });
+						update({
+							value: directory,
+							saved: directory === "" ? null : directory,
+							status: "",
+							tone: "muted",
+							busy: false,
+							supported: data.supported !== false,
+							local: data.local !== false,
+							exists: typeof data.exists === "boolean" ? data.exists : null
+						});
 					})();
 					return () => {
 						alive = false;
@@ -345,7 +457,7 @@ window.__ModuleLoader__.load({
 						return;
 					}
 					const directory = typeof data?.directory === "string" ? data.directory : "";
-					update({ value: directory, saved: directory === "" ? null : directory, status: t("saved"), tone: "ok", busy: false });
+					update({ value: directory, saved: directory === "" ? null : directory, status: t("saved"), tone: "ok", busy: false, exists: directory === "" ? null : true });
 				}
 
 				async function reset() {
@@ -356,7 +468,7 @@ window.__ModuleLoader__.load({
 						update({ busy: false, status: t("saveFailed") + describe(error), tone: "error" });
 						return;
 					}
-					update({ value: "", saved: null, status: t("cleared"), tone: "ok", busy: false });
+					update({ value: "", saved: null, status: t("cleared"), tone: "ok", busy: false, exists: null });
 				}
 
 				// 宿主不是 Windows：只说明情况，不显示用不了的输入框和按钮。
@@ -371,6 +483,10 @@ window.__ModuleLoader__.load({
 					{ style: PAGE_STYLE },
 					h("h3", { style: TITLE_STYLE }, t("title")),
 					h("p", { style: HINT_STYLE }, t("hint")),
+					// 宿主说已保存的目录不在了：提前说明下次会从系统默认位置开始，免得用户以为设置丢了。
+					state.exists === false ? h("p", { style: STATUS_STYLES.error }, t("missingHint")) : null,
+					// 不是本机打开的页面：说清楚插件在这里不接管，免得用户点了「浏览…」以为坏了。
+					state.local === false ? h("p", { style: HINT_STYLE }, t("remoteHint")) : null,
 					h(
 						"div",
 						{ style: ROW_STYLE },
@@ -379,6 +495,7 @@ window.__ModuleLoader__.load({
 							value: state.value,
 							placeholder: t("placeholder"),
 							"aria-label": t("inputLabel"),
+							maxLength: MAX_DIRECTORY_CHARS,
 							spellCheck: false,
 							style: INPUT_STYLE,
 							onChange: (event) => update({ value: event.target.value, status: "", tone: "muted" })
@@ -393,13 +510,11 @@ window.__ModuleLoader__.load({
 				);
 			}
 
-			// 两个槽位各自注册：DSH 哪天改名或删掉其中一个，另一个入口照样接管。
-			for (const hole of HOLES) {
-				try {
-					ctx.slots.inject(hole, () => ctx.slots.register({ name: hole, priority: -2 }, DirectoryFlow));
-				} catch (error) {
-					console.warn("[dsh-directory-plugin] directory flow takeover failed: " + hole, error);
-				}
+			// 接管放在 effect 里：预检是异步的，卸载后到达的结果必须作废（见 installDirectoryFlowTakeover）。
+			try {
+				ctx.effect(() => installDirectoryFlowTakeover(ctx), "dsh-directory-plugin directory flow takeover");
+			} catch (error) {
+				console.warn("[dsh-directory-plugin] directory flow takeover failed", error);
 			}
 
 			try {

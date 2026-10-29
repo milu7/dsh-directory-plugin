@@ -7,11 +7,15 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import worker from "../lib/dialog-worker.cjs";
 
-const { FOLDER_DIALOG_OPTIONS, HRESULT_CANCELLED, createPost, dshOwnerWindow, errorMessageOf, loadKoffi, loadWin32DialogBindings, reenableOwner, runFolderDialog } = worker;
+const { FOLDER_DIALOG_OPTIONS, HRESULT_CANCELLED, createPost, dshOwnerWindow, errorMessageOf, koffiCandidates, loadKoffi, loadWin32DialogBindings, reenableOwner, runFolderDialog } = worker;
 const VENDORED_KOFFI = fileURLToPath(new URL("../vendor/node_modules/koffi/index.cjs", import.meta.url));
 const WORKER = fileURLToPath(new URL("../lib/dialog-worker.cjs", import.meta.url));
 const windowsOnly = { skip: process.platform !== "win32" && "要调真实的 Win32 API" };
 const DSH_EXE = "D:\\DSH Next\\DSH NEXT.exe";
+/** COM 的失败 HRESULT 都是负数：E_FAIL、HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)、RPC_E_CHANGED_MODE。 */
+const HRESULT_E_FAIL = -2147467259;
+const HRESULT_FILE_NOT_FOUND = -2147024894;
+const HRESULT_RPC_E_CHANGED_MODE = -2147417850;
 
 describe("createPost：只有终止消息才结束会话", () => {
 	test("IPC：showing 之后不断开，done 之后才断开", () => {
@@ -38,6 +42,34 @@ describe("createPost：只有终止消息才结束会话", () => {
 		assert.deepEqual(sent, ["showing", "done"]);
 		assert.equal(proc.disconnects, 1);
 	});
+
+	test("宿主先断了通道：发不出去也不抛，也不会再去断开一个已经断开的通道", () => {
+		const proc = {
+			connected: false,
+			disconnects: 0,
+			disconnect() {
+				this.disconnects++;
+			}
+		};
+		const post = createPost({
+			send() {
+				throw Object.assign(new Error("IPC channel is closed"), { code: "ERR_IPC_CHANNEL_CLOSED" });
+			},
+			proc
+		});
+		assert.doesNotThrow(() => post({ kind: "done", path: null }));
+		assert.equal(proc.disconnects, 0);
+	});
+
+	test("别的异常照常抛：通道的问题不能被当成万能兜底", () => {
+		const post = createPost({
+			send() {
+				throw new TypeError("send is not a function");
+			},
+			proc: { connected: true, disconnect() {} }
+		});
+		assert.throws(() => post({ kind: "done", path: null }), TypeError);
+	});
 });
 
 describe("errorMessageOf：报错只带 message，堆栈另放", () => {
@@ -55,29 +87,53 @@ describe("errorMessageOf：报错只带 message，堆栈另放", () => {
 
 /**
  * 不碰 Win32 的绑定替身。calls 记录对话框和窗口收到的调用；
- * windows 描述现有的窗口：hwnd → { exe, enabled }。
+ * windows 描述现有的窗口：hwnd → { exe, enabled }；
+ * 其余参数用来造出某个阶段的失败（HRESULT 一律用负数，和 COM 一致）：
+ * getOptionsHr / setOptionsHr / setTitleHr / setFolderHr / itemHr / displayPath / result。
  */
-function fakeBindings({ calls = [], options = 0, foreground = null, windows = {}, show = 0 } = {}) {
+function fakeBindings({
+	calls = [],
+	options = 0,
+	foreground = null,
+	windows = {},
+	show = 0,
+	coInitHr = 0,
+	getOptionsHr = 0,
+	setOptionsHr = 0,
+	setTitleHr = 0,
+	setFolderHr = 0,
+	itemHr = 0,
+	resolvePath = (directory) => directory,
+	displayPath = (item) => ({ hr: 0, path: item.path }),
+	result = { hr: 0, path: "D:\\Picked" }
+} = {}) {
 	const windowOf = (hwnd) => windows[String(hwnd)];
 	return {
-		setThreadDpiAwareness() {},
-		coInitializeSta: () => 0,
-		coUninitialize() {},
+		setThreadDpiAwareness() {
+			calls.push(["setThreadDpiAwareness"]);
+		},
+		coInitializeSta: () => (calls.push(["coInitialize"]), coInitHr),
+		coUninitialize() {
+			calls.push(["coUninitialize"]);
+		},
 		foregroundRootWindow: () => foreground,
 		processImageOfWindow: (hwnd) => windowOf(hwnd)?.exe ?? null,
 		isWindow: (hwnd) => windowOf(hwnd) !== undefined,
 		isWindowEnabled: (hwnd) => windowOf(hwnd)?.enabled !== false,
 		enableWindow: (hwnd) => calls.push(["enableWindow", hwnd]),
-		displayPathOf: (item) => ({ hr: 0, path: item.path }),
-		shellItemFromPath: (directory) => ({ hr: 0, item: { path: directory } }),
+		displayPathOf: (item) => displayPath(item),
+		shellItemFromPath: (directory) => {
+			calls.push(["shellItemFromPath", directory]);
+			return itemHr < 0 ? { hr: itemHr } : { hr: itemHr, item: { path: resolvePath(directory) } };
+		},
 		release() {},
 		createFolderDialog: () => ({
-			getOptions: () => (typeof options === "number" ? { hr: 0, options } : options),
-			setOptions: (value) => (calls.push(["setOptions", value]), 0),
-			setTitle: (title) => (calls.push(["setTitle", title]), 0),
-			setFolder: () => 0,
+			getOptions: () => (calls.push(["getOptions"]), { hr: getOptionsHr, options }),
+			setOptions: (value) => (calls.push(["setOptions", value]), setOptionsHr),
+			setTitle: (title) => (calls.push(["setTitle", title]), setTitleHr),
+			setFolder: (item) => (calls.push(["setFolder", item.path]), setFolderHr),
 			show: (owner) => (calls.push(["show", owner]), show),
-			resultPath: () => (calls.push(["resultPath"]), { hr: 0, path: "D:\\Picked" }),
+			resultPath: () => (calls.push(["resultPath"]), typeof result === "function" ? result() : result),
 			release() {}
 		})
 	};
@@ -114,16 +170,41 @@ describe("runFolderDialog：选项与返回值", () => {
 		assert.deepEqual(callsNamed(calls, "setOptions"), [["setOptions", 0x80000000 + FOLDER_DIALOG_OPTIONS]]);
 	});
 
-	test("GetOptions 失败时报错，不弹框", () => {
+	test("GetOptions 失败不再致命：用内置的 FOS_* 兜底，照常弹框", () => {
 		const calls = [];
-		assert.throws(() => run(fakeBindings({ calls, options: { hr: -2147467259, options: 0 } })), /GetOptions failed: HRESULT 0x80004005/);
+		let reported;
+		const picked = run(fakeBindings({ calls, getOptionsHr: HRESULT_E_FAIL }), {}, (folder) => (reported = folder));
+		assert.equal(picked, "D:\\Picked");
+		assert.deepEqual(callsNamed(calls, "setOptions"), [["setOptions", FOLDER_DIALOG_OPTIONS]]);
+		assert.equal(reported.getOptionsHr, HRESULT_E_FAIL);
+		assert.equal(callsNamed(calls, "show").length, 1);
+	});
+
+	test("只有 SetOptions 失败还是致命的：不弹框", () => {
+		const calls = [];
+		assert.throws(() => run(fakeBindings({ calls, setOptionsHr: HRESULT_E_FAIL })), /SetOptions failed: HRESULT 0x80004005/);
 		assert.deepEqual(callsNamed(calls, "show"), []);
+	});
+
+	test("SetTitle 失败只记诊断，对话框照常弹", () => {
+		const calls = [];
+		let reported;
+		const picked = run(fakeBindings({ calls, setTitleHr: HRESULT_E_FAIL }), { title: "选择文件夹" }, (folder) => (reported = folder));
+		assert.equal(picked, "D:\\Picked");
+		assert.equal(reported.setTitleHr, HRESULT_E_FAIL);
+		assert.equal(callsNamed(calls, "show").length, 1);
 	});
 
 	test("用户取消（HRESULT_FROM_WIN32(ERROR_CANCELLED)）时返回 null，不再读结果", () => {
 		assert.equal(HRESULT_CANCELLED, -2147023673);
 		const calls = [];
 		assert.equal(run(fakeBindings({ calls, show: HRESULT_CANCELLED })), null);
+		assert.deepEqual(callsNamed(calls, "resultPath"), []);
+	});
+
+	test("Show 失败（不是取消）：按 Show 报错，也不再读结果", () => {
+		const calls = [];
+		assert.throws(() => run(fakeBindings({ calls, show: HRESULT_E_FAIL })), /Show failed: HRESULT 0x80004005/);
 		assert.deepEqual(callsNamed(calls, "resultPath"), []);
 	});
 
@@ -181,19 +262,183 @@ describe("reenableOwner：worker 崩溃后恢复被禁用的 DSH 窗口", () => 
 	});
 });
 
-describe("runFolderDialog：showing 里的起始目录诊断（设置页据此判断是否回退）", () => {
-	test("没配置起始目录：requested 为 null", () => {
+describe("runFolderDialog：起始目录诊断（宿主 stat 的结论，worker 不再自己碰磁盘）", () => {
+	const GONE = path.join(os.tmpdir(), "dsh-directory-plugin-gone-" + process.pid);
+
+	test("没配置起始目录：requested 为 null、state 为 none", () => {
 		let reported;
 		const picked = run(fakeBindings(), {}, (folder) => (reported = folder));
 		assert.equal(picked, "D:\\Picked");
-		assert.deepEqual(reported, { requested: null, applied: false });
+		assert.deepEqual(reported, { requested: null, applied: false, state: "none" });
 	});
 
-	test("配置的目录已不存在：requested 有值、applied 为 false", () => {
-		const missing = path.join(os.tmpdir(), "dsh-directory-plugin-missing-" + process.pid);
+	test("state=missing 且 Shell 解析失败：reason=missing，但仍然交过一次 SHCreateItemFromParsingName", () => {
+		const calls = [];
 		let reported;
-		run(fakeBindings(), { initialFolder: missing }, (folder) => (reported = folder));
-		assert.deepEqual(reported, { requested: missing, applied: false, reason: "missing" });
+		run(fakeBindings({ calls, itemHr: HRESULT_FILE_NOT_FOUND }), { initialFolder: GONE, initialState: "missing" }, (folder) => (reported = folder));
+		assert.deepEqual(reported, { requested: GONE, applied: false, state: "missing", itemHr: HRESULT_FILE_NOT_FOUND, reason: "missing" });
+		assert.deepEqual(callsNamed(calls, "shellItemFromPath"), [["shellItemFromPath", GONE]], "不再用 existsSync 预检，照旧交给 Shell 试一次");
+	});
+
+	test("state=not-dir / unknown：reason 跟着宿主的结论走", () => {
+		for (const state of ["not-dir", "unknown"]) {
+			let reported;
+			run(fakeBindings({ itemHr: HRESULT_FILE_NOT_FOUND }), { initialFolder: GONE, initialState: state }, (folder) => (reported = folder));
+			assert.equal(reported.state, state);
+			assert.equal(reported.reason, state);
+		}
+	});
+
+	test("state=dir 但 Shell 解析不出来：reason=SHCreateItemFromParsingName", () => {
+		let reported;
+		run(fakeBindings({ itemHr: HRESULT_FILE_NOT_FOUND }), { initialFolder: GONE, initialState: "dir" }, (folder) => (reported = folder));
+		assert.equal(reported.state, "dir");
+		assert.equal(reported.reason, "SHCreateItemFromParsingName");
+	});
+
+	test("宿主没给 state（老宿主）或给了不认识的值：按 unknown 报", () => {
+		for (const initialState of [undefined, "", "bogus"]) {
+			let reported;
+			run(fakeBindings({ itemHr: HRESULT_FILE_NOT_FOUND }), { initialFolder: GONE, initialState }, (folder) => (reported = folder));
+			assert.equal(reported.state, "unknown");
+			assert.equal(reported.reason, "unknown");
+		}
+	});
+
+	test("解析出来没有文件系统路径（虚拟文件夹）：reason=not-filesystem", () => {
+		let reported;
+		run(fakeBindings({ displayPath: () => ({ hr: 0, path: null }) }), { initialFolder: "D:\\Projects", initialState: "dir" }, (folder) => (reported = folder));
+		assert.deepEqual(reported, {
+			requested: "D:\\Projects",
+			applied: false,
+			state: "dir",
+			itemHr: 0,
+			resolvedHr: 0,
+			resolvedPath: null,
+			setFolderHr: 0,
+			reason: "not-filesystem"
+		});
+	});
+
+	test("宿主的 stat 过期了（state=missing 但目录又在了）：照样设上，不算失败", () => {
+		let reported;
+		run(fakeBindings(), { initialFolder: "D:\\Projects", initialState: "missing" }, (folder) => (reported = folder));
+		assert.equal(reported.applied, true);
+		assert.equal(reported.reason, undefined);
+	});
+
+	test("不再用 fs.existsSync 预检：不存在的目录只要 Shell 能解析就照设", () => {
+		const calls = [];
+		let reported;
+		const absent = path.join(os.tmpdir(), "dsh-directory-plugin-absent-" + process.pid);
+		run(fakeBindings({ calls }), { initialFolder: absent, initialState: "dir" }, (folder) => (reported = folder));
+		assert.deepEqual(callsNamed(calls, "setFolder"), [["setFolder", absent]]);
+		assert.equal(reported.applied, true);
+	});
+
+	test("SetFolder 失败：applied 为 false，setFolderHr 留给日志", () => {
+		let reported;
+		run(fakeBindings({ setFolderHr: HRESULT_E_FAIL }), { initialFolder: "D:\\Projects", initialState: "dir" }, (folder) => (reported = folder));
+		assert.equal(reported.applied, false);
+		assert.equal(reported.setFolderHr, HRESULT_E_FAIL);
+		assert.equal(reported.reason, "SetFolder");
+	});
+
+	test("SetFolder 成功、但 Shell 解析成别的目录：不算设上", () => {
+		let reported;
+		run(fakeBindings({ resolvePath: () => "D:\\Other" }), { initialFolder: "D:\\Projects", initialState: "dir" }, (folder) => (reported = folder));
+		assert.equal(reported.resolvedPath, "D:\\Other");
+		assert.equal(reported.applied, false);
+		assert.equal(reported.reason, "resolved-elsewhere");
+	});
+
+	test("尾部分隔符和大小写不同仍算同一个目录", () => {
+		let reported;
+		run(fakeBindings({ resolvePath: () => "D:\\Projects" }), { initialFolder: "d:\\projects\\", initialState: "dir" }, (folder) => (reported = folder));
+		assert.equal(reported.applied, true);
+	});
+
+	test("盘符根的尾部分隔符不会被削掉", () => {
+		let reported;
+		run(fakeBindings({ resolvePath: () => "D:\\" }), { initialFolder: "D:\\", initialState: "dir" }, (folder) => (reported = folder));
+		assert.equal(reported.applied, true);
+	});
+});
+
+describe("runFolderDialog：resultPath 的失败阶段", () => {
+	test("GetResult 失败：报 GetResult", () => {
+		assert.throws(() => run(fakeBindings({ result: { hr: HRESULT_E_FAIL, stage: "GetResult" } })), /GetResult failed: HRESULT 0x80004005/);
+	});
+
+	test("GetDisplayName 失败：报 GetDisplayName，不冒充 GetResult", () => {
+		assert.throws(() => run(fakeBindings({ result: { hr: HRESULT_FILE_NOT_FOUND, stage: "GetDisplayName" } })), /GetDisplayName failed: HRESULT 0x80070002/);
+	});
+
+	test("拿到的路径是空串：报错，不当成取消", () => {
+		assert.throws(() => run(fakeBindings({ result: { hr: 0, path: "" } })), /selected item has no filesystem path/);
+	});
+
+	test("拿到的路径不是字符串：同一条错", () => {
+		assert.throws(() => run(fakeBindings({ result: { hr: 0, path: null } })), /selected item has no filesystem path/);
+	});
+
+	test("绑定没带 stage 时按 GetResult 报（不静默吞掉 HRESULT）", () => {
+		assert.throws(() => run(fakeBindings({ result: { hr: HRESULT_E_FAIL } })), /GetResult failed: HRESULT 0x80004005/);
+	});
+});
+
+describe("runFolderDialog：必须先 CoInitialize", () => {
+	test("CoInitializeEx 失败：直接报错，不建对话框", () => {
+		const calls = [];
+		assert.throws(() => run(fakeBindings({ calls, coInitHr: HRESULT_RPC_E_CHANGED_MODE })), /CoInitializeEx failed: HRESULT 0x80010106/);
+		assert.deepEqual(callsNamed(calls, "setOptions"), []);
+		assert.deepEqual(callsNamed(calls, "show"), []);
+	});
+
+	test("正常收尾时 CoInitialize / CoUninitialize 配对", () => {
+		const calls = [];
+		run(fakeBindings({ calls }));
+		assert.equal(callsNamed(calls, "coInitialize").length, 1);
+		assert.equal(callsNamed(calls, "coUninitialize").length, 1);
+	});
+
+	test("中途失败也要 CoUninitialize", () => {
+		const calls = [];
+		assert.throws(() => run(fakeBindings({ calls, setOptionsHr: HRESULT_E_FAIL })));
+		assert.equal(callsNamed(calls, "coUninitialize").length, 1);
+	});
+});
+
+describe("koffiCandidates：env → 随包副本 → DSH 安装 → 裸模块", () => {
+	const withEnv = (value, body) => {
+		const previous = process.env.DSH_KOFFI_PATH;
+		if (value === undefined) delete process.env.DSH_KOFFI_PATH;
+		else process.env.DSH_KOFFI_PATH = value;
+		try {
+			return body();
+		} finally {
+			if (previous === undefined) delete process.env.DSH_KOFFI_PATH;
+			else process.env.DSH_KOFFI_PATH = previous;
+		}
+	};
+
+	test("没设 DSH_KOFFI_PATH：随包副本排第一，最后才轮到裸模块名", () => {
+		const candidates = withEnv(undefined, koffiCandidates);
+		assert.equal(candidates[0], VENDORED_KOFFI);
+		assert.equal(candidates[candidates.length - 1], "koffi");
+	});
+
+	test("设了 DSH_KOFFI_PATH：显式覆盖排在最前，随包副本退一位", () => {
+		const custom = "D:\\custom\\koffi\\index.cjs";
+		const candidates = withEnv(custom, koffiCandidates);
+		assert.equal(candidates[0], custom);
+		assert.equal(candidates[1], VENDORED_KOFFI);
+	});
+
+	test("不再把 app.asar 里的原生模块当候选（dlopen 不了）", () => {
+		for (const candidate of withEnv(undefined, koffiCandidates)) {
+			assert.doesNotMatch(candidate, /app\.asar[\\/]node_modules/, candidate);
+		}
 	});
 });
 
@@ -284,6 +529,21 @@ describe("Win32 绑定冒烟测试（真实 API，但不调用 Show，不会弹�
 		} finally {
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
+	});
+
+	test("null COM 指针（含 bigint 0）不会被当成地址去 decode", () => {
+		withBindings((bindings) => {
+			assert.throws(() => bindings.release(null), /null COM pointer/);
+			assert.throws(() => bindings.release(0n), /null COM pointer/);
+			assert.throws(() => bindings.displayPathOf(null), /null pointer/);
+		});
+	});
+
+	test("DPI：已经是感知上下文就不重复设置，重复调用也不抛", () => {
+		withBindings((bindings) => {
+			assert.doesNotThrow(() => bindings.setThreadDpiAwareness());
+			assert.doesNotThrow(() => bindings.setThreadDpiAwareness());
+		});
 	});
 
 	test("真实 worker 进程：修复模式能加载 koffi 并正常退出（句柄 0 不是窗口，什么都不改）", () => {

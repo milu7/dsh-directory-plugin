@@ -1,6 +1,6 @@
 {
   "name": "dsh-directory-plugin",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "目录插件：让 DeepSeek Harness 桌面端「新建工作区」的文件夹选择框从你设定的默认目录开始（Windows）。",
   "keywords": [
@@ -21,6 +21,9 @@
   "bugs": {
     "url": "https://github.com/milu7/dsh-directory-plugin/issues"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -36,7 +39,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "pack": "node scripts/pack.mjs"
   },
   "dsh": {
     "bundle": {

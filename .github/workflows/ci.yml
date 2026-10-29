@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (windows, node ${{ matrix.node }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Unit tests
+        run: npm test
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          node --check lib/index.js
+          node --check lib/core.js
+          node --check lib/dialog-worker.cjs
+          node --check client/client.js
+          node --check scripts/pack.mjs
+
+  pack:
+    name: package
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build zip
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          node scripts/pack.mjs --out "dist/dsh-directory-plugin-$version.zip"
+      - name: Publish release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $zip = "dist/dsh-directory-plugin-$version.zip"
+          gh release view "v$version" 2>$null
+          if ($LASTEXITCODE -ne 0) { gh release create "v$version" --title "v$version" --generate-notes }
+          gh release upload "v$version" $zip --clobber
