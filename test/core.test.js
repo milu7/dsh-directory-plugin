@@ -414,6 +414,13 @@ describe("redactPath：日志里的路径脱敏", () => {
 		assert.match(line, /D:\\…\\workspace-directory\.json/);
 	});
 
+	test("正斜杠写的绝对路径同样脱敏（旧配置迁移日志里可能出现）", windowsOnly, () => {
+		logEvent("config-migrated", "D:/Private Source/alice/secret.txt");
+		const line = readLog();
+		assert.doesNotMatch(line, /Private Source\/alice/, line);
+		assert.match(line, /D:\/…\\secret\.txt/);
+	});
+
 	test("DSH_DIRECTORY_LOG_PATHS=1 时写完整路径（排错用）", windowsOnly, (t) => {
 		t.after(() => delete process.env.DSH_DIRECTORY_LOG_PATHS);
 		process.env.DSH_DIRECTORY_LOG_PATHS = "1";
@@ -518,7 +525,8 @@ describe("runPick：非正常收尾都要救回 owner（假子进程）", () => 
 	 */
 	async function started(t) {
 		const calls = stubSpawn(t);
-		const pending = runPick(null, fake);
+		// 走 pickDirectory：cancelActivePick 管的是它登记的 activePick，直接调 runPick 不会登记。
+		const pending = pickDirectory(null, { purpose: "workspace", ...fake });
 		await waitFor(() => calls.length === 1);
 		return { calls, pending, child: calls[0].child };
 	}
@@ -574,10 +582,30 @@ describe("runPick：非正常收尾都要救回 owner（假子进程）", () => 
 		assert.equal(cancelActivePick(), true);
 		assert.equal(child.killed, true);
 		assert.match(readLog(), /pick-aborted/);
-		assert.equal(cancelActivePick(), false, "没有对话框时什么都不做");
 		// 真进程被 kill 之后会发 close，这里手动补一条让 promise 收尾。
 		child.emit("close", null, "SIGTERM");
 		await assert.rejects(pending, { code: "pick-exited", detail: "SIGTERM" });
 		assert.equal(calls.length, 2, "close 时照样兜一次 owner 修复");
+		assert.equal(cancelActivePick(), false, "收尾之后没有要取消的东西");
+	});
+
+	test("探测起始目录期间取消：不再拉起 worker，请求以 pick-aborted 收尾", async (t) => {
+		const calls = stubSpawn(t);
+		let releaseStat;
+		const gate = new Promise((resolve) => (releaseStat = resolve));
+		const realStat = fs.promises.stat;
+		t.mock.method(fs.promises, "stat", async (target) => {
+			if (String(target).includes("HANG")) return gate.then(() => ({ isDirectory: () => true }));
+			return realStat(target);
+		});
+		const pending = pickDirectory("D:\\HANG\\dir", { purpose: "workspace" });
+		await waitFor(() => calls.length > 0 || true);
+		// 探测还挂着：activeWorker 还没赋值，取消必须仍然生效。
+		assert.equal(cancelActivePick(), true, "探测窗口内也要能取消");
+		assert.match(readLog(), /pick-aborted/);
+		releaseStat();
+		await assert.rejects(pending, { code: "pick-aborted" });
+		assert.equal(calls.length, 0, "取消之后不能再 spawn worker");
+		assert.equal(cancelActivePick(), false, "收尾后没有要取消的东西");
 	});
 });

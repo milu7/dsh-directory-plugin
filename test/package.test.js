@@ -57,6 +57,11 @@ test("manifest 的入口、白名单与引擎范围齐全（打包与 CI 都依�
 	assert.ok(manifest.engines?.node, "缺少 engines.node");
 	assert.ok(manifest.scripts?.pack, "缺少 npm run pack");
 	assert.ok(fs.existsSync(path.join(ROOT, "scripts", "pack.mjs")), "打包脚本不存在");
+	// README 用相对路径引用 docs/images：发布包不带它们就是死链。
+	assert.ok(manifest.files.includes("docs/images"), "发布包需要带上 README 引用的图片");
+	for (const image of filesUnder(path.join(ROOT, "docs", "images"))) {
+		assert.ok(manifest.files.some((entry) => entry === "docs/images" || entry === "docs" || entry.startsWith("docs/")), "图片 " + image + " 不在发布白名单里");
+	}
 });
 
 test("CHANGELOG 的第一条就是当前版本", () => {

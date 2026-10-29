@@ -2,6 +2,18 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-10-29
+
+### 修复
+
+- **探测起始目录期间（最长 1.5 秒）插件卸载不再失效**：`cancelActivePick` 现在也覆盖 worker
+  尚未拉起的窗口，取消后不会再弹框（此前 `activeWorker` 未赋值时取消直接被忽略）。
+- 日志脱敏现在也识别正斜杠写的绝对路径：`config-migrated D:/a/b` 这类迁移日志不再泄露完整目录。
+
+### 变更
+
+- 发布包（zip）带上 `docs/images`：README 里的三张示意图在包内不再是死链。
+- README 修正「目录被删除」时的行为描述（插件的选择框回退到系统默认位置，而不是切换回内置选择器）。
 ## [1.1.0] - 2026-10-29
 
 ### 修复
