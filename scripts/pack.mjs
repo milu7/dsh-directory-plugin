@@ -41,12 +41,12 @@ function crc32(buffer) {
 	return (crc ^ -1) >>> 0;
 }
 
-/** DOS 日期时间（1900 基准，2 秒精度）。 */
+/** DOS 日期时间（1900 基准，2 秒精度），一律按 UTC 取值，结果不随机器时区变。 */
 function dosDateTime(date) {
-	const year = Math.max(date.getFullYear(), 1980);
+	const year = Math.max(date.getUTCFullYear(), 1980);
 	return {
-		time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
-		date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate()
+		time: (date.getUTCHours() << 11) | (date.getUTCMinutes() << 5) | Math.floor(date.getUTCSeconds() / 2),
+		date: ((year - 1980) << 9) | ((date.getUTCMonth() + 1) << 5) | date.getUTCDate()
 	};
 }
 
